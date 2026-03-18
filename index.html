@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Barrow — Terrain</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #1c1a17;
+      color: #c4b9a8;
+      font-family: 'EB Garamond', Georgia, serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #7a7268;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: #4a453e;
+      font-style: italic;
+      margin-bottom: 20px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .controls label {
+      font-size: 13px;
+      color: #7a7268;
+    }
+
+    .controls input {
+      background: #2a2620;
+      border: 1px solid #3a3630;
+      color: #c4b9a8;
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 13px;
+      width: 120px;
+      border-radius: 3px;
+    }
+
+    .controls button {
+      background: #2e2a22;
+      border: 1px solid #5a5040;
+      color: #b8a88a;
+      padding: 5px 14px;
+      font-family: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      border-radius: 3px;
+      transition: background 0.2s;
+    }
+
+    .controls button:hover {
+      background: #3e3a32;
+    }
+
+    canvas {
+      border: 1px solid #2a2620;
+      max-width: 100%;
+      height: auto;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 16px;
+      justify-content: center;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: #7a7268;
+    }
+
+    .legend-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 2px;
+      border: 1px solid #3a3630;
+    }
+
+    .info {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #4a453e;
+      font-style: italic;
+      text-align: center;
+      max-width: 600px;
+      line-height: 1.6;
+    }
+
+    .cursor-info {
+      margin-top: 12px;
+      font-size: 14px;
+      color: #8a8078;
+      text-align: center;
+      min-height: 20px;
+    }
+  </style>
+</head>
+<body>
+  <h1>The Barrow — Terrain Generator</h1>
+  <p class="subtitle">The rock beneath the world</p>
+  <div class="controls">
+    <label for="seed">Seed:</label>
+    <input type="text" id="seed" value="barrow" />
+    <button id="generate">Generate</button>
+    <button id="random">Random Seed</button>
+  </div>
+  <canvas id="terrain" width="600" height="800"></canvas>
+  <div class="cursor-info" id="cursor-info"></div>
+  <div class="legend" id="legend"></div>
+  <div class="info">
+    Each pixel is roughly one square mile. South at the bottom, north at the top.
+    The mountain spine runs through the west. Chalk in the south, clay in the east,
+    granite in the western highlands, glacial debris in the far north.
+    Hover over the map to inspect.
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
