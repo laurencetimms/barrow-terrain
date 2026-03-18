@@ -123,6 +123,12 @@
       text-align: center;
       min-height: 20px;
     }
+
+    .zoom-info {
+      font-size: 12px;
+      color: #5a5248;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
@@ -134,14 +140,14 @@
     <button id="generate">Generate</button>
     <button id="random">Random Seed</button>
   </div>
-  <canvas id="terrain" width="600" height="800"></canvas>
+  <canvas id="terrain"></canvas>
   <div class="cursor-info" id="cursor-info"></div>
+  <div class="zoom-info" id="zoom-info"></div>
   <div class="legend" id="legend"></div>
   <div class="info">
     Each pixel is roughly one square mile. South at the bottom, north at the top.
-    The mountain spine runs through the west. Chalk in the south, clay in the east,
-    granite in the western highlands, glacial debris in the far north.
-    Hover over the map to inspect.
+    Scroll to zoom. Drag to pan. Press 0 to reset view.
+    Hover to inspect geology.
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

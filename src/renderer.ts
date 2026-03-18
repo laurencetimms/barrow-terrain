@@ -1,18 +1,11 @@
 import { TerrainMap } from "./terrain";
 import { GEOLOGY_INFO, GeologyType } from "./geology";
 
-export function renderTerrain(
-  canvas: HTMLCanvasElement,
-  terrain: TerrainMap
-): void {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+// --- Full-resolution offscreen rendering ---
 
+export function renderTerrainToBuffer(terrain: TerrainMap): ImageData {
   const { width, height, cells } = terrain;
-  canvas.width = width;
-  canvas.height = height;
-
-  const imageData = ctx.createImageData(width, height);
+  const imageData = new ImageData(width, height);
   const data = imageData.data;
 
   for (let y = 0; y < height; y++) {
@@ -20,21 +13,17 @@ export function renderTerrain(
       const cell = cells[y][x];
       const idx = (y * width + x) * 4;
 
-      // Get base colour from geology
       const geoInfo = GEOLOGY_INFO[cell.geology];
       const baseColor = hexToRgb(geoInfo.color);
 
-      // Apply altitude shading — lighter at higher altitude, darker at lower
-      // Subtle effect to show hills and valleys within geological zones
-      const altShade = cell.geology === GeologyType.Water
-        ? 1.0
-        : 0.7 + cell.altitude * 0.6;
+      const altShade =
+        cell.geology === GeologyType.Water ? 1.0 : 0.7 + cell.altitude * 0.6;
 
       let r = baseColor.r * altShade;
       let g = baseColor.g * altShade;
       let b = baseColor.b * altShade;
 
-      // Water depth shading — deeper = darker
+      // Water depth shading
       if (cell.geology === GeologyType.Water) {
         const depthFactor = 0.6 + cell.altitude * 1.8;
         r = baseColor.r * depthFactor;
@@ -49,7 +38,7 @@ export function renderTerrain(
         b = Math.min(255, b + 8);
       }
 
-      // River overlay — blue-dark, width varies with flow
+      // River overlay
       if (cell.riverFlow > 0) {
         const riverIntensity = Math.min(1, cell.riverFlow / 500);
         const riverR = 50;
@@ -68,18 +57,114 @@ export function renderTerrain(
     }
   }
 
-  ctx.putImageData(imageData, 0, 0);
+  return imageData;
 }
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (!result) return { r: 128, g: 128, b: 128 };
-  return {
-    r: parseInt(result[1], 16),
-    g: parseInt(result[2], 16),
-    b: parseInt(result[3], 16),
-  };
+// --- Zoom/pan viewport ---
+
+export interface Viewport {
+  // Centre of the view in terrain coordinates
+  cx: number;
+  cy: number;
+  // Zoom level: 1 = fit whole map, 2 = 2x zoom, etc.
+  zoom: number;
 }
+
+export function renderViewport(
+  canvas: HTMLCanvasElement,
+  buffer: ImageData,
+  terrain: TerrainMap,
+  viewport: Viewport
+): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+
+  // Clear
+  ctx.fillStyle = "#1c1a17";
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Create an offscreen canvas with the full terrain image
+  const offscreen = new OffscreenCanvas(terrain.width, terrain.height);
+  const offCtx = offscreen.getContext("2d");
+  if (!offCtx) return;
+  offCtx.putImageData(buffer, 0, 0);
+
+  // Calculate the source rectangle (what portion of the terrain to show)
+  const baseScale = Math.min(cw / terrain.width, ch / terrain.height);
+  const scale = baseScale * viewport.zoom;
+
+  // How many terrain pixels fit in the canvas at this zoom
+  const viewW = cw / scale;
+  const viewH = ch / scale;
+
+  // Source rectangle, clamped to terrain bounds
+  let sx = viewport.cx - viewW / 2;
+  let sy = viewport.cy - viewH / 2;
+
+  // Clamp so we don't go outside the terrain
+  sx = Math.max(0, Math.min(terrain.width - viewW, sx));
+  sy = Math.max(0, Math.min(terrain.height - viewH, sy));
+
+  // Use nearest-neighbour rendering for crisp pixels when zoomed
+  ctx.imageSmoothingEnabled = viewport.zoom > 2 ? false : true;
+
+  ctx.drawImage(
+    offscreen,
+    sx,
+    sy,
+    viewW,
+    viewH,
+    0,
+    0,
+    cw,
+    ch
+  );
+}
+
+// Convert canvas pixel position to terrain cell coordinates
+export function canvasToTerrain(
+  canvas: HTMLCanvasElement,
+  terrain: TerrainMap,
+  viewport: Viewport,
+  clientX: number,
+  clientY: number
+): { x: number; y: number } | null {
+  const rect = canvas.getBoundingClientRect();
+  const canvasX = (clientX - rect.left) * (canvas.width / rect.width);
+  const canvasY = (clientY - rect.top) * (canvas.height / rect.height);
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+
+  const baseScale = Math.min(cw / terrain.width, ch / terrain.height);
+  const scale = baseScale * viewport.zoom;
+
+  const viewW = cw / scale;
+  const viewH = ch / scale;
+
+  let sx = viewport.cx - viewW / 2;
+  let sy = viewport.cy - viewH / 2;
+  sx = Math.max(0, Math.min(terrain.width - viewW, sx));
+  sy = Math.max(0, Math.min(terrain.height - viewH, sy));
+
+  const terrainX = Math.floor(sx + canvasX / scale);
+  const terrainY = Math.floor(sy + canvasY / scale);
+
+  if (
+    terrainX >= 0 &&
+    terrainX < terrain.width &&
+    terrainY >= 0 &&
+    terrainY < terrain.height
+  ) {
+    return { x: terrainX, y: terrainY };
+  }
+  return null;
+}
+
+// --- Legend ---
 
 export function renderLegend(container: HTMLElement): void {
   container.innerHTML = "";
@@ -110,4 +195,16 @@ export function renderLegend(container: HTMLElement): void {
     item.appendChild(label);
     container.appendChild(item);
   }
+}
+
+// --- Utility ---
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!result) return { r: 128, g: 128, b: 128 };
+  return {
+    r: parseInt(result[1], 16),
+    g: parseInt(result[2], 16),
+    b: parseInt(result[3], 16),
+  };
 }
