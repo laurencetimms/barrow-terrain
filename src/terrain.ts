@@ -528,6 +528,220 @@ function markCoasts(
 }
 
 // ---------------------------------------------------------------------------
+// Coastal geology correction
+// ---------------------------------------------------------------------------
+
+/**
+ * Post-processing pass: coastal cells misclassified as Clay (due to the
+ * low-altitude fallback in classifyGeology) are overridden with the dominant
+ * hard geology found inland within a short radius. This ensures chalk cliffs,
+ * granite headlands, limestone coasts, etc. appear at the shoreline rather
+ * than a uniform clay transition everywhere.
+ *
+ * Only Clay cells on the coast are touched — cells that are naturally coastal
+ * clay (eastern lowlands, glacial forelands) have no hard geology nearby and
+ * are left unchanged.
+ */
+function fixCoastalGeology(
+  cells: TerrainCell[][],
+  width: number,
+  height: number
+): void {
+  // Geology types that can override a misclassified coastal clay cell.
+  // Glacial is intentionally excluded — glacial debris shores are correctly
+  // low and gradual and should stay as-is.
+  const HARD_GEOS: ReadonlySet<GeologyType> = new Set([
+    GeologyType.Granite,
+    GeologyType.Slate,
+    GeologyType.Chalk,
+    GeologyType.Limestone,
+    GeologyType.Sandstone,
+  ]);
+
+  const RADIUS = 8;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!cells[y][x].isCoast) continue;
+      if (cells[y][x].geology !== GeologyType.Clay) continue;
+
+      // Tally hard-geology cells within the radius, weighting closer cells
+      // more heavily so the geology directly behind this coastal cell wins
+      // over distant geology on a different part of the coast.
+      const scores = new Map<GeologyType, number>();
+      for (let dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (let dx = -RADIUS; dx <= RADIUS; dx++) {
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          const dist = Math.hypot(dx, dy);
+          if (dist > RADIUS) continue;
+          const geo = cells[ny2][nx2].geology;
+          if (!HARD_GEOS.has(geo)) continue;
+          scores.set(geo, (scores.get(geo) ?? 0) + 1 / (1 + dist));
+        }
+      }
+
+      if (scores.size === 0) continue; // naturally clay coast — leave it
+
+      let best: GeologyType = GeologyType.Clay;
+      let bestScore = 0;
+      for (const [geo, score] of scores) {
+        if (score > bestScore) { bestScore = score; best = geo; }
+      }
+      cells[y][x].geology = best;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fine-scale river generation for high-res patches
+// ---------------------------------------------------------------------------
+
+/**
+ * Generates rivers at fine (patch) resolution.
+ *
+ * The coarse map is 300×500 cells; each coarse cell covers roughly 1 square
+ * mile. A patch subdivides each coarse cell into resScale×resScale fine cells.
+ * Naïvely re-running the watershed on the patch would miss all drainage that
+ * originates outside the patch boundary, so large rivers would lose their
+ * upstream contribution and disappear.
+ *
+ * Fix: normalise each fine cell's rainfall to coarse-equivalent units
+ * (divide by resScale²) so the threshold of 80 keeps the same geographic
+ * meaning. Then, for every coarse river cell that has no upstream river
+ * neighbour already inside the patch — river heads and patch-entry cells —
+ * inject the full coarse riverFlow into the highest-altitude fine cell of
+ * that coarse cell. This seeds the accumulated upstream drainage that the
+ * fine watershed cannot see (drainage outside the patch, or non-river
+ * feeder cells whose individual flows are all below the coarse threshold).
+ *
+ * Result: rivers are 1 fine cell wide (not resScale cells wide), follow
+ * fine-resolution terrain, and correctly represent the coarse river network.
+ */
+function generateRiversForPatch(
+  cells: TerrainCell[][],
+  width: number,
+  height: number,
+  coarseMap: TerrainMap,
+  coarseX0: number,
+  coarseY0: number,
+  patchCoarseW: number,
+  patchCoarseH: number,
+  resScale: number
+): void {
+  const flow = Array.from({ length: height }, () => new Float32Array(width));
+
+  // Normalised rainfall: resScale² fine cells = 1 coarse cell, so dividing
+  // by resScale² keeps accumulated flow in coarse-equivalent units.
+  const rainfallScale = 1 / (resScale * resScale);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (cells[y][x].geology !== GeologyType.Water) {
+        flow[y][x] = (0.5 + cells[y][x].altitude * 0.5) * rainfallScale;
+      }
+    }
+  }
+
+  // Upstream injection: for each coarse river cell in the patch that has an
+  // upstream river neighbour outside the patch, inject the coarse riverFlow
+  // into the highest-altitude fine cell inside that coarse cell. This
+  // simulates drainage that exists on the wider map but has no fine cells
+  // here to accumulate it.
+  const dirs8: [number, number][] = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1,  0],          [1,  0],
+    [-1,  1], [0,  1], [1,  1],
+  ];
+
+  for (let cy = coarseY0; cy < coarseY0 + patchCoarseH; cy++) {
+    for (let cx = coarseX0; cx < coarseX0 + patchCoarseW; cx++) {
+      const coarseCell = coarseMap.cells[cy][cx];
+      if (coarseCell.riverFlow <= 0) continue;
+
+      // Inject unless there is an upstream river neighbour (higher altitude,
+      // also a river) already inside the patch — in which case the fine
+      // watershed will receive that upstream flow naturally and no seeding
+      // is needed here.
+      //
+      // This covers two cases that both require injection:
+      //   • River heads (no upstream river anywhere): drainage basin may
+      //     extend beyond the patch via non-river cells; fine rainfall alone
+      //     underestimates the flow.
+      //   • Entry points (upstream river is outside the patch): the fine
+      //     watershed has no fine cells for that upstream reach at all.
+      let hasUpstreamInsidePatch = false;
+      for (const [dx, dy] of dirs8) {
+        const ncx = cx + dx, ncy = cy + dy;
+        if (ncx < 0 || ncx >= coarseMap.width || ncy < 0 || ncy >= coarseMap.height) continue;
+        const nb = coarseMap.cells[ncy][ncx];
+        if (nb.altitude <= coarseCell.altitude || nb.riverFlow <= 0) continue;
+        if (
+          ncx >= coarseX0 && ncx < coarseX0 + patchCoarseW &&
+          ncy >= coarseY0 && ncy < coarseY0 + patchCoarseH
+        ) {
+          hasUpstreamInsidePatch = true;
+          break;
+        }
+      }
+      if (hasUpstreamInsidePatch) continue;
+
+      // Inject at the highest-altitude fine cell within this coarse cell
+      // (the "upstream end" at fine resolution).
+      const fxBase = (cx - coarseX0) * resScale;
+      const fyBase = (cy - coarseY0) * resScale;
+      let bestAlt = -1, bestFx = -1, bestFy = -1;
+      for (let dy = 0; dy < resScale; dy++) {
+        for (let dx = 0; dx < resScale; dx++) {
+          const fx = fxBase + dx, fy = fyBase + dy;
+          if (fx < 0 || fx >= width || fy < 0 || fy >= height) continue;
+          if (cells[fy][fx].altitude > bestAlt) {
+            bestAlt = cells[fy][fx].altitude;
+            bestFx = fx; bestFy = fy;
+          }
+        }
+      }
+      if (bestFx >= 0) flow[bestFy][bestFx] += coarseCell.riverFlow;
+    }
+  }
+
+  // Sort fine cells by altitude (highest first) and cascade flow downhill.
+  const sorted: [number, number][] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) sorted.push([x, y]);
+  }
+  sorted.sort((a, b) => cells[b[1]][b[0]].altitude - cells[a[1]][a[0]].altitude);
+
+  const dirs: [number, number][] = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1,  0],          [1,  0],
+    [-1,  1], [0,  1], [1,  1],
+  ];
+  for (const [x, y] of sorted) {
+    if (cells[y][x].geology === GeologyType.Water) continue;
+    let lowestAlt = cells[y][x].altitude, lx = -1, ly = -1;
+    for (const [dx, dy] of dirs) {
+      const nx2 = x + dx, ny2 = y + dy;
+      if (nx2 >= 0 && nx2 < width && ny2 >= 0 && ny2 < height &&
+          cells[ny2][nx2].altitude < lowestAlt) {
+        lowestAlt = cells[ny2][nx2].altitude;
+        lx = nx2; ly = ny2;
+      }
+    }
+    if (lx >= 0) flow[ly][lx] += flow[y][x];
+  }
+
+  // Same threshold as the coarse map — flow is in coarse-equivalent units.
+  const riverThreshold = 80;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (flow[y][x] > riverThreshold && cells[y][x].geology !== GeologyType.Water) {
+        cells[y][x].riverFlow = flow[y][x];
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // High-resolution patch generation
 // ---------------------------------------------------------------------------
 
@@ -583,26 +797,13 @@ export function generateHighResPatch(
     cells.push(row);
   }
 
-  // Inherit rivers from the coarse map rather than regenerating from scratch.
-  //
-  // Rivers generated on the patch alone are 1 fine cell wide. At the lower
-  // end of tier 2 (zoom ≈ 3×), fine cells are sub-pixel (0.75 canvas pixels),
-  // so nearest-neighbour rendering silently drops them. Inheriting the coarse
-  // river makes each coarse river cell expand to a resScale×resScale block of
-  // fine cells, matching the visual width of the tier-1 rendering at the
-  // tier boundary and staying proportionally visible at higher zooms.
-  for (let fy = 0; fy < fineH; fy++) {
-    for (let fx = 0; fx < fineW; fx++) {
-      const coarseXi = Math.min(coarseMap.width  - 1, Math.floor(coarseX0 + fx / resScale));
-      const coarseYi = Math.min(coarseMap.height - 1, Math.floor(coarseY0 + fy / resScale));
-      const coarseCell = coarseMap.cells[coarseYi][coarseXi];
-      if (coarseCell.riverFlow > 0) {
-        cells[fy][fx].riverFlow = coarseCell.riverFlow;
-      }
-    }
-  }
+  generateRiversForPatch(
+    cells, fineW, fineH,
+    coarseMap, coarseX0, coarseY0, patchCoarseW, patchCoarseH, resScale
+  );
 
   markCoasts(cells, fineW, fineH);
+  fixCoastalGeology(cells, fineW, fineH);
 
   return { width: fineW, height: fineH, cells, seed: coarseMap.seed };
 }
@@ -642,6 +843,7 @@ export function generateTerrain(
 
   generateRivers(cells, width, height);
   markCoasts(cells, width, height);
+  fixCoastalGeology(cells, width, height);
 
   return { width, height, cells, seed };
 }
