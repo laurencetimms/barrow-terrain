@@ -79,7 +79,16 @@ export function renderTerrainToBuffer(terrain: TerrainMap): ImageData {
         const riverR = 50;
         const riverG = 70 + riverIntensity * 20;
         const riverB = 100 + riverIntensity * 30;
-        const blend = 0.6 + riverIntensity * 0.3;
+        let blend = 0.6 + riverIntensity * 0.3;
+        // Safety net for subpixel-wide rivers: if no neighbours have riverFlow,
+        // this is a 1-cell-wide river that may be thinner than a canvas pixel.
+        // Boost the blend so it stays visible even when partially covered.
+        const isolated =
+          (x === 0 || cells[y][x - 1].riverFlow === 0) &&
+          (x === width - 1 || cells[y][x + 1].riverFlow === 0) &&
+          (y === 0 || cells[y - 1][x].riverFlow === 0) &&
+          (y === height - 1 || cells[y + 1][x].riverFlow === 0);
+        if (isolated) blend = Math.min(1, blend + 0.25);
         r = r * (1 - blend) + riverR * blend;
         g = g * (1 - blend) + riverG * blend;
         b = b * (1 - blend) + riverB * blend;

@@ -739,6 +739,28 @@ function generateRiversForPatch(
       }
     }
   }
+
+  // River widening: major rivers should be several cells wide at fine resolution.
+  // For each river cell, spread flow into nearby cells proportional to flow volume.
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const riverFlow = cells[y][x].riverFlow;
+      if (riverFlow <= 0) continue;
+      const extraWidth = Math.floor(Math.min(3, riverFlow / 200));
+      if (extraWidth <= 0) continue;
+      for (let dy = -extraWidth; dy <= extraWidth; dy++) {
+        for (let dx = -extraWidth; dx <= extraWidth; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          if (cells[ny2][nx2].geology === GeologyType.Water) continue;
+          if (cells[ny2][nx2].riverFlow < riverThreshold) {
+            cells[ny2][nx2].riverFlow = riverThreshold;
+          }
+        }
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
