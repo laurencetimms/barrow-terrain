@@ -1,9 +1,10 @@
 import { createSeededNoise } from "./noise";
-import { generateTerrain, TerrainMap } from "./terrain";
+import { generateTerrain, generateHighResPatch, TerrainMap, TerrainCell } from "./terrain";
 import { GEOLOGY_INFO } from "./geology";
 import {
   renderTerrainToBuffer,
   renderViewport,
+  renderHighResViewport,
   renderLegend,
   canvasToTerrain,
   Viewport,
@@ -12,7 +13,21 @@ import {
 // --- State ---
 let currentTerrain: TerrainMap | null = null;
 let currentBuffer: ImageData | null = null;
+let currentNoise: ReturnType<typeof createSeededNoise> | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
+
+// --- High-res cache ---
+interface HighResCache {
+  tier: 2 | 3;
+  resScale: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  terrain: TerrainMap;
+  buffer: ImageData;
+}
+let highResCache: HighResCache | null = null;
 
 // --- Map dimensions ---
 const MAP_WIDTH = 300;
@@ -37,17 +52,141 @@ canvas.height = CANVAS_HEIGHT;
 // --- Render legend ---
 renderLegend(legendContainer);
 
+// --- Zoom tier helpers ---
+function getZoomTier(zoom: number): 1 | 2 | 3 {
+  return zoom < 3 ? 1 : zoom < 8 ? 2 : 3;
+}
+
+/**
+ * Computes the padded patch bounds (in coarse terrain coordinates) that
+ * should be generated for the current viewport, capped to a sensible maximum
+ * so generation stays fast. Also returns the raw visible-area corners for
+ * cache-validity checking.
+ */
+function computePatchBounds(terrain: TerrainMap, vp: Viewport) {
+  const baseScale = Math.min(canvas.width / terrain.width, canvas.height / terrain.height);
+  const scale = baseScale * vp.zoom;
+  const viewW = canvas.width / scale;
+  const viewH = canvas.height / scale;
+  let sx = Math.max(0, Math.min(terrain.width  - viewW, vp.cx - viewW / 2));
+  let sy = Math.max(0, Math.min(terrain.height - viewH, vp.cy - viewH / 2));
+
+  const tier = getZoomTier(vp.zoom);
+  const pad  = tier === 2 ? 20 : 10;
+  const maxW = tier === 2 ? 120 : 60;
+  const maxH = tier === 2 ? 180 : 90;
+
+  let x0 = Math.max(0, Math.floor(sx) - pad);
+  let y0 = Math.max(0, Math.floor(sy) - pad);
+  let x1 = Math.min(terrain.width,  Math.ceil(sx + viewW) + pad);
+  let y1 = Math.min(terrain.height, Math.ceil(sy + viewH) + pad);
+
+  if (x1 - x0 > maxW) {
+    const cx = (x0 + x1) / 2;
+    x0 = Math.floor(cx - maxW / 2);
+    x1 = x0 + maxW;
+  }
+  if (y1 - y0 > maxH) {
+    const cy = (y0 + y1) / 2;
+    y0 = Math.floor(cy - maxH / 2);
+    y1 = y0 + maxH;
+  }
+
+  return { x0, y0, x1, y1, viewSx: sx, viewSy: sy, viewW, viewH };
+}
+
 // --- Render current state ---
 function render(): void {
   if (!currentTerrain || !currentBuffer) return;
-  renderViewport(canvas, currentBuffer, currentTerrain, viewport);
+
+  const tier = getZoomTier(viewport.zoom);
+
+  if (tier === 1) {
+    highResCache = null;
+    renderViewport(canvas, currentBuffer, currentTerrain, viewport);
+    updateZoomDisplay();
+    return;
+  }
+
+  if (!currentNoise) return;
+
+  const resScale = tier === 2 ? 8 : 16;
+  const bounds = computePatchBounds(currentTerrain, viewport);
+
+  const needsNewCache =
+    !highResCache ||
+    highResCache.tier !== tier ||
+    bounds.viewSx < highResCache.x0 ||
+    bounds.viewSy < highResCache.y0 ||
+    bounds.viewSx + bounds.viewW > highResCache.x1 ||
+    bounds.viewSy + bounds.viewH > highResCache.y1;
+
+  if (needsNewCache) {
+    const patch = generateHighResPatch(
+      currentTerrain,
+      currentNoise,
+      bounds.x0,
+      bounds.y0,
+      bounds.x1 - bounds.x0,
+      bounds.y1 - bounds.y0,
+      resScale
+    );
+    highResCache = {
+      tier,
+      resScale,
+      x0: bounds.x0,
+      y0: bounds.y0,
+      x1: bounds.x1,
+      y1: bounds.y1,
+      terrain: patch,
+      buffer: renderTerrainToBuffer(patch),
+    };
+  }
+
+  renderHighResViewport(canvas, highResCache!, viewport, currentTerrain);
   updateZoomDisplay();
 }
 
 function updateZoomDisplay(): void {
   if (zoomInfo) {
-    zoomInfo.textContent = `Zoom: ${viewport.zoom.toFixed(1)}x`;
+    const tier = getZoomTier(viewport.zoom);
+    const tierLabel = tier === 1 ? "" : ` · tier ${tier}`;
+    zoomInfo.textContent = `Zoom: ${viewport.zoom.toFixed(1)}x${tierLabel}`;
   }
+}
+
+// --- Cell lookup respecting high-res cache ---
+function getHoveredCell(clientX: number, clientY: number): TerrainCell | null {
+  if (!currentTerrain) return null;
+
+  if (highResCache) {
+    // Reconstruct fractional coarse position for sub-cell precision
+    const rect = canvas.getBoundingClientRect();
+    const baseScale = Math.min(
+      canvas.width / currentTerrain.width,
+      canvas.height / currentTerrain.height
+    );
+    const scale = baseScale * viewport.zoom;
+    const viewW = canvas.width / scale;
+    const viewH = canvas.height / scale;
+    let sx = Math.max(0, Math.min(currentTerrain.width  - viewW, viewport.cx - viewW / 2));
+    let sy = Math.max(0, Math.min(currentTerrain.height - viewH, viewport.cy - viewH / 2));
+
+    const fracCoarseX = sx + (clientX - rect.left) * (canvas.width  / rect.width)  / scale;
+    const fracCoarseY = sy + (clientY - rect.top)  * (canvas.height / rect.height) / scale;
+
+    const fx = Math.floor((fracCoarseX - highResCache.x0) * highResCache.resScale);
+    const fy = Math.floor((fracCoarseY - highResCache.y0) * highResCache.resScale);
+    const t = highResCache.terrain;
+    if (fx >= 0 && fx < t.width && fy >= 0 && fy < t.height) {
+      return t.cells[fy][fx];
+    }
+  }
+
+  // Fallback: coarse cell
+  const pos = canvasToTerrain(canvas, currentTerrain, viewport, clientX, clientY);
+  if (!pos) return null;
+  return currentTerrain.cells[pos.y][pos.x];
 }
 
 // --- Generate terrain ---
@@ -55,8 +194,10 @@ function generate(seed: string): void {
   const startTime = performance.now();
 
   const noise = createSeededNoise(seed);
+  currentNoise = noise;
   currentTerrain = generateTerrain(noise, MAP_WIDTH, MAP_HEIGHT, seed);
   currentBuffer = renderTerrainToBuffer(currentTerrain);
+  highResCache = null;
 
   // Reset viewport to show whole map
   viewport = {
@@ -152,19 +293,15 @@ window.addEventListener("mouseup", () => {
 
 // --- Touch support for mobile ---
 let lastTouchDist = 0;
-let lastTouchX = 0;
-let lastTouchY = 0;
 
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   if (e.touches.length === 1) {
     isDragging = true;
-    lastTouchX = e.touches[0].clientX;
-    lastTouchY = e.touches[0].clientY;
     dragStartCx = viewport.cx;
     dragStartCy = viewport.cy;
-    dragStartX = lastTouchX;
-    dragStartY = lastTouchY;
+    dragStartX = e.touches[0].clientX;
+    dragStartY = e.touches[0].clientY;
   } else if (e.touches.length === 2) {
     isDragging = false;
     lastTouchDist = Math.hypot(
@@ -212,9 +349,8 @@ canvas.addEventListener("touchend", () => {
 canvas.addEventListener("mousemove", (e) => {
   if (isDragging || !currentTerrain) return;
 
-  const pos = canvasToTerrain(canvas, currentTerrain, viewport, e.clientX, e.clientY);
-  if (pos) {
-    const cell = currentTerrain.cells[pos.y][pos.x];
+  const cell = getHoveredCell(e.clientX, e.clientY);
+  if (cell) {
     const info = GEOLOGY_INFO[cell.geology];
     const altMetres = Math.round(cell.altitude * 1200);
     const river = cell.riverFlow > 0 ? " · River" : "";
@@ -248,3 +384,4 @@ canvas.style.cursor = "crosshair";
 
 // --- Initial generation ---
 generate("barrow");
+

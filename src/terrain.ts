@@ -75,30 +75,44 @@ function curveYAtX(points: readonly [number, number][], x: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Mountain spine — a curved path running broadly N–S through the western third.
- * The granite zone is a noise-warped distance field around this curve.
+ * Mountain spine — curved path running SW→NNE through the western portion,
+ * bending further northeast in the upper section.
  */
 const SPINE_CURVE: readonly [number, number][] = [
-  [0.21, 0.02],
-  [0.19, 0.18],
-  [0.23, 0.35],
-  [0.21, 0.52],
-  [0.26, 0.68],
-  [0.20, 0.84],
-  [0.22, 0.97],
+  [0.18, 0.02],
+  [0.20, 0.16],
+  [0.22, 0.30],
+  [0.26, 0.44],
+  [0.30, 0.57],
+  [0.34, 0.70],
+  [0.38, 0.83],
+  [0.40, 0.95],
 ];
 
 /**
- * Chalk escarpment — gently curved arc running broadly E–W across the south.
- * Points sorted by x so curveYAtX works correctly.
- * Geology south of this arc is chalk/clay; the arc itself is the crest.
+ * Spine branch — splits NE from the mid-spine, extending into the central
+ * highlands as a secondary ridge.
+ */
+const SPINE_BRANCH: readonly [number, number][] = [
+  [0.30, 0.57],
+  [0.38, 0.64],
+  [0.47, 0.71],
+  [0.55, 0.78],
+  [0.58, 0.84],
+];
+
+/**
+ * Chalk escarpment — S-curve running through the southern portion,
+ * curving independently of the spine. Points sorted by x so curveYAtX works.
  */
 const CHALK_CURVE: readonly [number, number][] = [
-  [0.10, 0.30],
-  [0.25, 0.26],
-  [0.42, 0.21],
-  [0.60, 0.19],
-  [0.78, 0.23],
+  [0.10, 0.28],
+  [0.22, 0.24],
+  [0.35, 0.20],
+  [0.50, 0.22],
+  [0.62, 0.26],
+  [0.75, 0.30],
+  [0.85, 0.28],
 ];
 
 /** Fault valley 1 — diagonal NW→SE depression cutting through the highlands. */
@@ -183,6 +197,15 @@ function generateAltitude(
   const spineFadeSouth = Math.min(1, wny / 0.10);
   spineHeight *= spineFadeSouth * 0.58;
 
+  // ── Spine branch — secondary ridge splitting NE from mid-spine ────────────
+  const branchWarpX = warpCoord(noise2D, gx, gy, 1150, 2250, 0.009, 0.05);
+  const branchWarpY = warpCoord(noise2D, gx, gy, 3350, 4450, 0.009, 0.05);
+  const branchDist = distToCurve(SPINE_BRANCH, wnx + branchWarpX, wny + branchWarpY);
+  const branchWidth = 0.07 + layeredNoise(noise2D, gy * 0.5, 650, 3, 0.5, 2.0, 0.008) * 0.030;
+  let branchHeight = Math.max(0, 1 - (branchDist / branchWidth) ** 2);
+  branchHeight *= (0.70 + layeredNoise(noise2D, gy, 750, 3, 0.5, 2.0, 0.012) * 0.25) * 0.48;
+  branchHeight *= spineFadeSouth;
+
   // ── Southern chalk escarpment (distance from chalk curve) ─────────────────
   const chalkDist = distToCurve(CHALK_CURVE, wnx, wny);
   // Boost near the crest of the escarpment
@@ -246,7 +269,7 @@ function generateAltitude(
   const altitude =
     0.33
     + largeNoise + medNoise + smallNoise
-    + spineHeight
+    + Math.max(spineHeight, branchHeight)
     + southAlt
     + eastAlt + waterLandsAlt
     + iceAlt
@@ -275,47 +298,64 @@ function classifyGeology(
   if (altitude < seaLevel) return GeologyType.Water;
 
   // Water-lands — patchy water/land near sea level in the east
-  if (altitude < seaLevel + 0.04 && nx > 0.62) {
+  // Boundary noise-warped so the eastern coastline is ragged, not a straight meridian
+  const waterLandsBoundary = 0.62
+    + layeredNoise(noise2D, gy * 0.008 + 11000, gx * 0.008 + 11000, 3, 0.5, 2.0, 1.0) * 0.06
+    + warpCoord(noise2D, gx, gy, 11100, 11200, 0.007, 0.05);
+  if (altitude < seaLevel + 0.04 && nx > waterLandsBoundary) {
     const patchNoise = layeredNoise(noise2D, gx + 5000, gy + 5000, 4, 0.5, 2.0, 0.035);
     if (patchNoise < -0.05) return GeologyType.Water;
   }
 
-  // ── Ice sheet (altitude-threshold varying with latitude) ─────────────────
-  // Ice sits on high ground and follows terrain contours — not a flat curtain.
-  // As latitude increases, the ice descends to lower altitudes.
-  if (ny > 0.68) {
-    const iceWarp = layeredNoise(noise2D, gx + 9000, gy + 9000, 4, 0.5, 2.0, 0.014) * 0.10;
+  // ── Ice sheet (equilibrium altitude with hard southern cutoff) ───────────
+  // The equilibrium line — above which ice persists — rises steeply as
+  // latitude decreases, modelled as an exponential. South of the cutoff
+  // latitude, the line effectively reaches infinity: no terrain is cold
+  // enough for ice, regardless of altitude.
+  //
+  // Separate noise warps on the cutoff location and the equilibrium altitude
+  // give the southern ice limit a ragged, terrain-following character.
+  const iceWarpCutoff = layeredNoise(noise2D, gx + 9100, gy + 9100, 3, 0.5, 2.0, 0.018);
+  const iceWarpLine   = layeredNoise(noise2D, gx + 9000, gy + 9000, 4, 0.5, 2.0, 0.015);
 
-    if (ny > 0.72) {
-      // Pure glacial: altitude above the ice line
-      const iceT = (ny - 0.72) / 0.28; // 0..1 across the glacial zone
-      const iceAltThreshold = Math.max(0.05, 0.78 - iceT * 0.74 + iceWarp);
-      if (altitude > iceAltThreshold) return GeologyType.Glacial;
-    }
+  // Hard southern limit — noise-warped so the boundary is ragged (±0.06)
+  const iceLatCutoff = 0.65 + iceWarpCutoff * 0.06;
 
-    // Glacial debris: moraines, erratics, meltwater channels — patchy fringe
-    // south of and at the lower margin of the ice
-    const debrisT = (ny - 0.68) / 0.32;
-    const debrisThreshold = Math.max(0.12, 0.86 - debrisT * 0.62 + iceWarp);
-    if (altitude > debrisThreshold) {
+  if (ny >= iceLatCutoff) {
+    // Distance above the cutoff (0 at cutoff, up to ~0.35 at the far north)
+    const latAbove = ny - iceLatCutoff;
+
+    // Equilibrium altitude: very high just above the cutoff (only the most
+    // extreme peaks get ice near the southern limit), dropping steeply as
+    // latitude increases so the far north is broadly glaciated.
+    // exp(-8 × latAbove): at latAbove=0 → 0.28+0.72=1.0, at latAbove=0.35 → ~0.32
+    const equilibriumAlt = 0.28 + 0.72 * Math.exp(-latAbove * 8) + iceWarpLine * 0.07;
+
+    if (altitude > equilibriumAlt) return GeologyType.Ice;
+
+    // Glacial debris: patchy fringe just below the equilibrium line
+    if (altitude > equilibriumAlt - 0.10) {
       const debrisNoise = layeredNoise(noise2D, gx + 3200, gy + 3200, 3, 0.5, 2.0, 0.025);
       if (debrisNoise > 0) return GeologyType.Glacial;
     }
   }
 
-  // ── Granite zone — noise-warped distance field around the spine curve ─────
+  // ── Granite zone — noise-warped distance field around the spine + branch ──
   // Heavy warp gives a blobby outline with fingers extending along ridges and
   // slate-filled valleys penetrating back inward.
-  const graniteWarpX = warpCoord(noise2D, gx, gy, 5500, 6600, 0.010, 0.07);
-  const graniteWarpY = warpCoord(noise2D, gx, gy, 7700, 8800, 0.010, 0.07);
-  const spineDist = distToCurve(SPINE_CURVE, nx + graniteWarpX, ny + graniteWarpY);
+  const graniteWarpX = warpCoord(noise2D, gx, gy, 5500, 6600, 0.010, 0.12);
+  const graniteWarpY = warpCoord(noise2D, gx, gy, 7700, 8800, 0.010, 0.12);
+  const spineDistG  = distToCurve(SPINE_CURVE,  nx + graniteWarpX, ny + graniteWarpY);
+  const branchDistG = distToCurve(SPINE_BRANCH, nx + graniteWarpX, ny + graniteWarpY);
+  const combinedSpineDistG = Math.min(spineDistG, branchDistG);
 
-  // Large-scale blob noise widens and narrows the granite body irregularly
-  const graniteBlob = layeredNoise(noise2D, gx + 9100, gy + 9100, 5, 0.55, 2.0, 0.011) * 0.065;
+  // Two-scale blob noise widens and narrows the granite body irregularly
+  const graniteBlob  = layeredNoise(noise2D, gx + 9100, gy + 9100, 5, 0.55, 2.0, 0.011) * 0.085;
+  const graniteBlob2 = layeredNoise(noise2D, gx + 9300, gy + 9300, 4, 0.60, 2.0, 0.018) * 0.045;
   // Higher altitude → wider granite envelope (summits are always granite)
-  const graniteZoneWidth = 0.075 + graniteBlob + Math.max(0, altitude - 0.32) * 0.18;
+  const graniteZoneWidth = 0.075 + graniteBlob + graniteBlob2 + Math.max(0, altitude - 0.32) * 0.22;
 
-  if (spineDist < graniteZoneWidth && altitude > 0.30) {
+  if (combinedSpineDistG < graniteZoneWidth && altitude > 0.30) {
     // Slate-filled valleys penetrate into the granite body along depressions
     const valleyNoise = layeredNoise(noise2D, gx + 9200, gy + 9200, 4, 0.5, 2.0, 0.015);
     if (valleyNoise < -0.28 && altitude < 0.44) return GeologyType.Slate;
@@ -325,7 +365,10 @@ function classifyGeology(
 
   // Far western peninsula — granite at lower altitudes (like a granite headland)
   const penBoundary = 0.11 + layeredNoise(noise2D, gy + 4300, gx + 4300, 3, 0.5, 2.0, 0.015) * 0.03;
-  if (nx < penBoundary && ny < 0.38 && altitude > seaLevel + 0.02) {
+  const penLatBoundary = 0.38
+    + layeredNoise(noise2D, gx * 0.010 + 12000, gy * 0.010 + 12000, 3, 0.5, 2.0, 1.0) * 0.05
+    + warpCoord(noise2D, gx, gy, 12100, 12200, 0.008, 0.04);
+  if (nx < penBoundary && ny < penLatBoundary && altitude > seaLevel + 0.02) {
     return GeologyType.Granite;
   }
 
@@ -482,6 +525,68 @@ function markCoasts(
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// High-resolution patch generation
+// ---------------------------------------------------------------------------
+
+/**
+ * Generates a fine-resolution TerrainMap covering a rectangular sub-region
+ * of the coarse map. Each coarse cell is subdivided into resScale×resScale
+ * fine cells. Uses the same noise and generation logic as the coarse map,
+ * with an additional high-frequency detail layer. Deterministic: the same
+ * coarse position and resScale always produce the same patch.
+ */
+export function generateHighResPatch(
+  coarseMap: TerrainMap,
+  noise: NoiseGenerator,
+  coarseX0: number,
+  coarseY0: number,
+  patchCoarseW: number,
+  patchCoarseH: number,
+  resScale: number
+): TerrainMap {
+  const { noise2D } = noise;
+  const fineW = patchCoarseW * resScale;
+  const fineH = patchCoarseH * resScale;
+  const cells: TerrainCell[][] = [];
+
+  for (let fy = 0; fy < fineH; fy++) {
+    const row: TerrainCell[] = [];
+    for (let fx = 0; fx < fineW; fx++) {
+      // Fractional coarse coordinates — same nx/ny space as the coarse map
+      const coarseX = coarseX0 + fx / resScale;
+      const coarseY = coarseY0 + fy / resScale;
+      const nx = coarseX / coarseMap.width;
+      const ny = 1 - coarseY / coarseMap.height;
+
+      // Base altitude (identical to coarse at coarse-cell centres, smoothly
+      // interpolated between them via fractional gx/gy)
+      let altitude = generateAltitude(noise, nx, ny, coarseX, coarseY);
+
+      // High-frequency detail: adds sub-coarse-cell variation that averages
+      // to zero at the coarse scale. Offset 80000 keeps it uncorrelated with
+      // all base noise domains.
+      altitude += layeredNoise(
+        noise2D,
+        coarseX * resScale + 80000,
+        coarseY * resScale + 80000,
+        3, 0.5, 2.0, 0.12
+      ) * 0.025;
+      altitude = Math.max(0, Math.min(1, altitude));
+
+      const geology = classifyGeology(nx, ny, altitude, noise, coarseX, coarseY);
+
+      row.push({ altitude, geology, riverFlow: 0, isCoast: false, nx, ny });
+    }
+    cells.push(row);
+  }
+
+  generateRivers(cells, fineW, fineH);
+  markCoasts(cells, fineW, fineH);
+
+  return { width: fineW, height: fineH, cells, seed: coarseMap.seed };
 }
 
 // ---------------------------------------------------------------------------

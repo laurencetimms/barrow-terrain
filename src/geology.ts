@@ -6,6 +6,7 @@ export enum GeologyType {
   Slate = "slate",
   Clay = "clay",
   Glacial = "glacial",
+  Ice = "ice",
   Water = "water",
 }
 
@@ -65,6 +66,13 @@ export const GEOLOGY_INFO: Record<GeologyType, GeologyInfo> = {
     color: "#9898a0",
     description:
       "Raw ground left by the retreating ice. Moraines, erratics, meltwater channels. No soil. Pioneer birch.",
+  },
+  [GeologyType.Ice]: {
+    type: GeologyType.Ice,
+    label: "Ice",
+    color: "#dff0f8",
+    description:
+      "The great ice sheet. Bare white beyond counting. Nothing moves but wind and the slow groan of the glacier.",
   },
   [GeologyType.Water]: {
     type: GeologyType.Water,

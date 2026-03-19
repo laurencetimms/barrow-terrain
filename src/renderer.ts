@@ -17,7 +17,9 @@ export function renderTerrainToBuffer(terrain: TerrainMap): ImageData {
       const baseColor = hexToRgb(geoInfo.color);
 
       const altShade =
-        cell.geology === GeologyType.Water ? 1.0 : 0.7 + cell.altitude * 0.6;
+        cell.geology === GeologyType.Water ? 1.0
+        : cell.geology === GeologyType.Ice  ? 0.92 + cell.altitude * 0.10
+        : 0.7 + cell.altitude * 0.6;
 
       let r = baseColor.r * altShade;
       let g = baseColor.g * altShade;
@@ -124,6 +126,61 @@ export function renderViewport(
   );
 }
 
+// --- High-resolution viewport ---
+
+/**
+ * Renders a high-resolution patch to the canvas. The cache covers a
+ * rectangular sub-region of the coarse terrain at resScale fine cells per
+ * coarse cell. The viewport is still expressed in coarse terrain coordinates.
+ */
+export function renderHighResViewport(
+  canvas: HTMLCanvasElement,
+  cache: {
+    resScale: number;
+    x0: number;
+    y0: number;
+    terrain: TerrainMap;
+    buffer: ImageData;
+  },
+  viewport: Viewport,
+  coarseTerrain: TerrainMap
+): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const cw = canvas.width;
+  const ch = canvas.height;
+
+  ctx.fillStyle = "#1c1a17";
+  ctx.fillRect(0, 0, cw, ch);
+
+  const offscreen = new OffscreenCanvas(cache.terrain.width, cache.terrain.height);
+  const offCtx = offscreen.getContext("2d");
+  if (!offCtx) return;
+  offCtx.putImageData(cache.buffer, 0, 0);
+
+  const baseScale = Math.min(cw / coarseTerrain.width, ch / coarseTerrain.height);
+  const scale = baseScale * viewport.zoom;
+  const viewW = cw / scale;
+  const viewH = ch / scale;
+
+  let sx = viewport.cx - viewW / 2;
+  let sy = viewport.cy - viewH / 2;
+  sx = Math.max(0, Math.min(coarseTerrain.width  - viewW, sx));
+  sy = Math.max(0, Math.min(coarseTerrain.height - viewH, sy));
+
+  // Convert coarse viewport rect to fine patch pixel coordinates
+  const fineSx = (sx - cache.x0) * cache.resScale;
+  const fineSy = (sy - cache.y0) * cache.resScale;
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(
+    offscreen,
+    fineSx, fineSy, viewW * cache.resScale, viewH * cache.resScale,
+    0, 0, cw, ch
+  );
+}
+
 // Convert canvas pixel position to terrain cell coordinates
 export function canvasToTerrain(
   canvas: HTMLCanvasElement,
@@ -176,6 +233,7 @@ export function renderLegend(container: HTMLElement): void {
     GeologyType.Slate,
     GeologyType.Clay,
     GeologyType.Glacial,
+    GeologyType.Ice,
     GeologyType.Water,
   ];
 
