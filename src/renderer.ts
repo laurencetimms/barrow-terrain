@@ -40,6 +40,39 @@ export function renderTerrainToBuffer(terrain: TerrainMap): ImageData {
         b = Math.min(255, b + 8);
       }
 
+      // Hillshading — simulated NW light source at 45° elevation.
+      // Skipped for water (flat surface; depth shading already does the work).
+      if (cell.geology !== GeologyType.Water) {
+        // Altitude of orthogonal neighbours, clamped to grid bounds
+        const altW = cells[y][Math.max(0, x - 1)].altitude;
+        const altE = cells[y][Math.min(width - 1, x + 1)].altitude;
+        const altN = cells[Math.max(0, y - 1)][x].altitude;   // y-1 is north
+        const altS = cells[Math.min(height - 1, y + 1)][x].altitude;
+
+        // Central-difference gradient: (east component, north component)
+        const dzdx = (altE - altW) * 0.5;
+        const dzdy = (altN - altS) * 0.5;   // sign: y-1 = north = higher ny
+
+        // Unnormalised surface normal in (east, north, up) space.
+        // z-factor exaggerates vertical relief so subtle slopes cast visible shade.
+        const zf = 8.0;
+        const snx = -dzdx * zf;
+        const sny = -dzdy * zf;
+        // snz = 1.0 (implicit; included in length below)
+
+        // Dot with NW-45° light unit vector (-0.5, 0.5, 0.707).
+        // (-0.5)²+(0.5)²+(0.707)² = 0.25+0.25+0.5 = 1.0 — already unit length.
+        const dot = snx * (-0.5) + sny * 0.5 + 0.707;
+        const hillshade = Math.max(0, dot / Math.sqrt(snx * snx + sny * sny + 1.0));
+
+        // Shade factor: 0.70 fully shadowed → 1.30 fully lit.
+        // Normalised so a flat horizontal surface (hillshade ≈ 0.707) gets ≈ 1.12.
+        const sf = 0.70 + hillshade * 0.60;
+        r *= sf;
+        g *= sf;
+        b *= sf;
+      }
+
       // River overlay
       if (cell.riverFlow > 0) {
         const riverIntensity = Math.min(1, cell.riverFlow / 500);

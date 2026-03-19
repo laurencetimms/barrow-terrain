@@ -583,7 +583,25 @@ export function generateHighResPatch(
     cells.push(row);
   }
 
-  generateRivers(cells, fineW, fineH);
+  // Inherit rivers from the coarse map rather than regenerating from scratch.
+  //
+  // Rivers generated on the patch alone are 1 fine cell wide. At the lower
+  // end of tier 2 (zoom ≈ 3×), fine cells are sub-pixel (0.75 canvas pixels),
+  // so nearest-neighbour rendering silently drops them. Inheriting the coarse
+  // river makes each coarse river cell expand to a resScale×resScale block of
+  // fine cells, matching the visual width of the tier-1 rendering at the
+  // tier boundary and staying proportionally visible at higher zooms.
+  for (let fy = 0; fy < fineH; fy++) {
+    for (let fx = 0; fx < fineW; fx++) {
+      const coarseXi = Math.min(coarseMap.width  - 1, Math.floor(coarseX0 + fx / resScale));
+      const coarseYi = Math.min(coarseMap.height - 1, Math.floor(coarseY0 + fy / resScale));
+      const coarseCell = coarseMap.cells[coarseYi][coarseXi];
+      if (coarseCell.riverFlow > 0) {
+        cells[fy][fx].riverFlow = coarseCell.riverFlow;
+      }
+    }
+  }
+
   markCoasts(cells, fineW, fineH);
 
   return { width: fineW, height: fineH, cells, seed: coarseMap.seed };
