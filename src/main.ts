@@ -6,7 +6,7 @@ import {
   bakeVegetationNoise,
   renderViewport,
   renderHighResViewport,
-  renderLegend,
+  renderKeyPanel,
   canvasToTerrain,
   Viewport,
 } from "./renderer";
@@ -16,6 +16,7 @@ let currentTerrain: TerrainMap | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
+let showKey = true;
 
 // --- High-res patch cache (buffer only — terrain lives in the worker) ---
 interface HighResCache {
@@ -79,20 +80,21 @@ const CANVAS_WIDTH = 600;
 const CANVAS_HEIGHT = 800;
 
 // --- UI Elements ---
-const canvas = document.getElementById("terrain") as HTMLCanvasElement;
-const seedInput = document.getElementById("seed") as HTMLInputElement;
-const generateBtn = document.getElementById("generate") as HTMLButtonElement;
-const randomBtn = document.getElementById("random") as HTMLButtonElement;
+const canvas      = document.getElementById("terrain")    as HTMLCanvasElement;
+const seedInput   = document.getElementById("seed")       as HTMLInputElement;
+const generateBtn = document.getElementById("generate")   as HTMLButtonElement;
+const randomBtn   = document.getElementById("random")     as HTMLButtonElement;
 const vegCheckbox = document.getElementById("vegetation") as HTMLInputElement;
-const legendContainer = document.getElementById("legend") as HTMLElement;
-const cursorInfo = document.getElementById("cursor-info") as HTMLElement;
-const zoomInfo = document.getElementById("zoom-info") as HTMLElement;
+const keyCheckbox = document.getElementById("show-key")   as HTMLInputElement;
+const keyPanel    = document.getElementById("key-panel")  as HTMLElement;
+const cursorInfo  = document.getElementById("cursor-info") as HTMLElement;
+const zoomInfo    = document.getElementById("zoom-info")  as HTMLElement;
 
-canvas.width = CANVAS_WIDTH;
+canvas.width  = CANVAS_WIDTH;
 canvas.height = CANVAS_HEIGHT;
 
-// --- Render legend ---
-renderLegend(legendContainer);
+// --- Build key panel (static — content never changes) ---
+renderKeyPanel(keyPanel);
 
 // --- Zoom tier helpers ---
 function getZoomTier(zoom: number): 1 | 2 | 3 {
@@ -197,11 +199,39 @@ function render(): void {
 }
 
 function updateZoomDisplay(): void {
-  if (zoomInfo) {
-    const tier = getZoomTier(viewport.zoom);
-    const tierLabel = tier === 1 ? "" : ` · tier ${tier}`;
-    zoomInfo.textContent = `Zoom: ${viewport.zoom.toFixed(1)}x${tierLabel}`;
+  const tier = getZoomTier(viewport.zoom);
+  const tierLabel = tier === 1 ? "" : ` · tier ${tier}`;
+  const zoomLine = `Zoom: ${viewport.zoom.toFixed(1)}×${tierLabel}`;
+
+  let scaleLine = "";
+  if (currentTerrain) {
+    // Compute how many coarse cells (≈ miles) fit across the visible canvas.
+    const baseScale = Math.min(
+      canvas.width / currentTerrain.width,
+      canvas.height / currentTerrain.height,
+    );
+    const viewW = canvas.width / (baseScale * viewport.zoom); // visible miles
+    // canvas.clientWidth is the rendered CSS-pixel width of the canvas element.
+    // 1 inch = 96 CSS px (standard); 1 cm = 96/2.54 CSS px.
+    const cssPx = canvas.clientWidth || canvas.width;
+    const miPerIn = viewW * 96 / cssPx;
+    const kmPerCm = miPerIn * 1.60934 / 2.54;
+    scaleLine = `1 in ≈ ${fmtMi(miPerIn)} · 1 cm ≈ ${fmtKm(kmPerCm)}`;
   }
+
+  zoomInfo.innerHTML = zoomLine + (scaleLine ? `<br>${scaleLine}` : "");
+}
+
+function fmtMi(mi: number): string {
+  if (mi >= 10)  return `${Math.round(mi)} mi`;
+  if (mi >= 0.1) return `${mi.toFixed(1)} mi`;
+  return `${Math.round(mi * 1760)} yd`;
+}
+
+function fmtKm(km: number): string {
+  if (km >= 10)  return `${Math.round(km)} km`;
+  if (km >= 0.1) return `${km.toFixed(1)} km`;
+  return `${Math.round(km * 1000)} m`;
 }
 
 // --- Cell lookup ---
@@ -251,6 +281,11 @@ randomBtn.addEventListener("click", () => {
   const randomSeed = Math.random().toString(36).substring(2, 10);
   seedInput.value = randomSeed;
   generate(randomSeed);
+});
+
+keyCheckbox.addEventListener("change", () => {
+  showKey = keyCheckbox.checked;
+  keyPanel.classList.toggle("hidden", !showKey);
 });
 
 vegCheckbox.addEventListener("change", () => {

@@ -506,33 +506,97 @@ export function canvasToTerrain(
   return null;
 }
 
-// --- Legend ---
+// --- Key panel ---
 
-export function renderLegend(container: HTMLElement): void {
+// Representative vegetation colours shown in the key, ordered by geology then
+// by visual character. These mirror the colours used in computeVegetationColor.
+const VEG_KEY_ENTRIES: Array<{ color: string; label: string }> = [
+  { color: "rgb(190,200,120)", label: "Chalk grassland" },
+  { color: "rgb(120,145,70)",  label: "Chalk scrub" },
+  { color: "rgb(55,95,40)",    label: "Chalk yew & hazel" },
+  { color: "rgb(65,110,40)",   label: "Limestone ash wood" },
+  { color: "rgb(165,170,145)", label: "Limestone pavement" },
+  { color: "rgb(128,82,112)",  label: "Sandstone heathland" },
+  { color: "rgb(65,90,72)",    label: "Sandstone birch-pine" },
+  { color: "rgb(105,100,42)",  label: "Granite moorland" },
+  { color: "rgb(38,72,28)",    label: "Granite valley oakwood" },
+  { color: "rgb(162,155,110)", label: "Granite lichen rock" },
+  { color: "rgb(24,68,35)",    label: "Slate oak-hazel wood" },
+  { color: "rgb(96,96,42)",    label: "Slate ridge moorland" },
+  { color: "rgb(28,58,28)",    label: "Clay wildwood" },
+  { color: "rgb(52,95,45)",    label: "Clay alder-willow carr" },
+  { color: "rgb(138,122,45)",  label: "Clay reed beds" },
+  { color: "rgb(150,158,115)", label: "Glacial pioneer lichen" },
+  { color: "rgb(120,138,95)",  label: "Glacial birch & willow" },
+  { color: "rgb(110,160,45)",  label: "River margins (all)" },
+];
+
+const GEO_ORDER: GeologyType[] = [
+  GeologyType.Chalk,
+  GeologyType.Limestone,
+  GeologyType.Sandstone,
+  GeologyType.Granite,
+  GeologyType.Slate,
+  GeologyType.Clay,
+  GeologyType.Glacial,
+  GeologyType.Ice,
+  GeologyType.Water,
+];
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  cls?: string,
+  text?: string,
+): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function sectionTitle(text: string): HTMLElement {
+  return el("div", "key-section-title", text);
+}
+
+/**
+ * Builds the full key panel: a Geology section (with colour swatches and
+ * descriptions) and a Vegetation section (representative colours and labels).
+ * Call once at startup; the panel content never needs to change.
+ */
+export function renderKeyPanel(container: HTMLElement): void {
   container.innerHTML = "";
-  const types: GeologyType[] = [
-    GeologyType.Chalk,
-    GeologyType.Limestone,
-    GeologyType.Sandstone,
-    GeologyType.Granite,
-    GeologyType.Slate,
-    GeologyType.Clay,
-    GeologyType.Glacial,
-    GeologyType.Ice,
-    GeologyType.Water,
-  ];
 
-  for (const type of types) {
+  // --- Geology section ---
+  container.appendChild(sectionTitle("Geology"));
+
+  for (const type of GEO_ORDER) {
     const info = GEOLOGY_INFO[type];
-    const item = document.createElement("div");
-    item.className = "legend-item";
+    const item = el("div", "key-geo-item");
 
-    const swatch = document.createElement("div");
-    swatch.className = "legend-swatch";
+    const swatch = el("div", "key-geo-swatch");
     swatch.style.backgroundColor = info.color;
 
-    const label = document.createElement("span");
-    label.textContent = info.label;
+    const text = el("div");
+    const name = el("span", "key-geo-name", info.label);
+    const desc = el("span", "key-geo-desc", info.description);
+    text.appendChild(name);
+    text.appendChild(desc);
+
+    item.appendChild(swatch);
+    item.appendChild(text);
+    container.appendChild(item);
+  }
+
+  // --- Vegetation section ---
+  container.appendChild(sectionTitle("Vegetation"));
+
+  for (const entry of VEG_KEY_ENTRIES) {
+    const item = el("div", "key-veg-item");
+
+    const swatch = el("div", "key-veg-swatch");
+    swatch.style.backgroundColor = entry.color;
+
+    const label = el("span", "key-veg-label", entry.label);
 
     item.appendChild(swatch);
     item.appendChild(label);

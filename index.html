@@ -45,12 +45,9 @@
       justify-content: center;
     }
 
-    .controls label {
-      font-size: 13px;
-      color: #7a7268;
-    }
+    .controls label { font-size: 13px; color: #7a7268; }
 
-    .controls input {
+    .controls input[type="text"] {
       background: #2a2620;
       border: 1px solid #3a3630;
       color: #c4b9a8;
@@ -73,11 +70,9 @@
       transition: background 0.2s;
     }
 
-    .controls button:hover {
-      background: #3e3a32;
-    }
+    .controls button:hover { background: #3e3a32; }
 
-    .controls .veg-toggle {
+    .toggle-label {
       display: flex;
       align-items: center;
       gap: 6px;
@@ -87,88 +82,177 @@
       user-select: none;
     }
 
-    .controls .veg-toggle input[type="checkbox"] {
-      width: auto;
+    .toggle-label input[type="checkbox"] {
       accent-color: #6a8a50;
       cursor: pointer;
     }
 
+    /* Map row: canvas on the left, key panel on the right */
+    .map-row {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+
+    .map-area {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
     canvas {
       border: 1px solid #2a2620;
+      display: block;
       max-width: 100%;
       height: auto;
     }
 
-    .legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 16px;
-      justify-content: center;
+    .cursor-info {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #8a8078;
+      text-align: center;
+      min-height: 18px;
+      max-width: 600px;
     }
 
-    .legend-item {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 12px;
-      color: #7a7268;
+    .zoom-info {
+      margin-top: 4px;
+      font-size: 11px;
+      color: #5a5248;
+      text-align: center;
+      line-height: 1.6;
+      min-height: 34px;
     }
 
-    .legend-swatch {
+    /* Key panel */
+    .key-panel {
+      width: 210px;
+      max-height: 800px;
+      overflow-y: auto;
+      background: #1f1d19;
+      border: 1px solid #2a2620;
+      border-radius: 3px;
+      padding: 10px 12px;
+      flex-shrink: 0;
+    }
+
+    .key-panel.hidden { display: none; }
+
+    .key-section-title {
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #5a5248;
+      margin-bottom: 8px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid #2a2620;
+    }
+
+    .key-section-title + .key-section-title,
+    .key-veg-item ~ .key-section-title,
+    .key-geo-item ~ .key-section-title {
+      margin-top: 14px;
+    }
+
+    .key-geo-item {
+      display: flex;
+      gap: 7px;
+      margin-bottom: 8px;
+      align-items: flex-start;
+    }
+
+    .key-geo-swatch {
       width: 14px;
       height: 14px;
       border-radius: 2px;
       border: 1px solid #3a3630;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .key-geo-name {
+      display: block;
+      font-size: 12px;
+      color: #9a9088;
+      margin-bottom: 2px;
+      line-height: 1.2;
+    }
+
+    .key-geo-desc {
+      display: block;
+      font-size: 10.5px;
+      color: #3e3a34;
+      font-style: italic;
+      line-height: 1.4;
+    }
+
+    .key-veg-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      margin-bottom: 5px;
+    }
+
+    .key-veg-swatch {
+      width: 11px;
+      height: 11px;
+      border-radius: 2px;
+      border: 1px solid rgba(255,255,255,0.06);
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .key-veg-label {
+      font-size: 11px;
+      color: #5e5a54;
+      line-height: 1.35;
     }
 
     .info {
-      margin-top: 16px;
-      font-size: 13px;
-      color: #4a453e;
+      margin-top: 14px;
+      font-size: 12px;
+      color: #3e3a34;
       font-style: italic;
       text-align: center;
-      max-width: 600px;
+      max-width: 640px;
       line-height: 1.6;
-    }
-
-    .cursor-info {
-      margin-top: 12px;
-      font-size: 14px;
-      color: #8a8078;
-      text-align: center;
-      min-height: 20px;
-    }
-
-    .zoom-info {
-      font-size: 12px;
-      color: #5a5248;
-      margin-top: 6px;
     }
   </style>
 </head>
 <body>
   <h1>The Barrow — Terrain Generator</h1>
   <p class="subtitle">The rock beneath the world</p>
+
   <div class="controls">
     <label for="seed">Seed:</label>
     <input type="text" id="seed" value="barrow" />
     <button id="generate">Generate</button>
     <button id="random">Random Seed</button>
-    <label class="veg-toggle">
+    <label class="toggle-label">
       <input type="checkbox" id="vegetation" />
       Vegetation
     </label>
+    <label class="toggle-label">
+      <input type="checkbox" id="show-key" checked />
+      Key
+    </label>
   </div>
-  <canvas id="terrain"></canvas>
-  <div class="cursor-info" id="cursor-info"></div>
-  <div class="zoom-info" id="zoom-info"></div>
-  <div class="legend" id="legend"></div>
-  <div class="info">
-    Each pixel is roughly one square mile. South at the bottom, north at the top.
-    Scroll to zoom. Drag to pan. Press 0 to reset view.
-    Hover to inspect geology.
+
+  <div class="map-row">
+    <div class="map-area">
+      <canvas id="terrain"></canvas>
+      <div class="cursor-info" id="cursor-info"></div>
+      <div class="zoom-info" id="zoom-info"></div>
+    </div>
+    <div class="key-panel" id="key-panel"></div>
   </div>
+
+  <p class="info">
+    Each coarse cell ≈ 1 mile. South at the bottom, north at the top.
+    Scroll to zoom · Drag to pan · Press 0 to reset view · Hover to inspect geology.
+  </p>
+
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
