@@ -16,6 +16,8 @@ export interface TerrainMap {
   height: number;
   cells: TerrainCell[][];
   seed: string;
+  /** Pre-baked vegetation noise, indexed [y * width + x]. Set by bakeVegetationNoise(). */
+  vegNoise?: Float32Array;
 }
 
 // ---------------------------------------------------------------------------

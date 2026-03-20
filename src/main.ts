@@ -1,8 +1,9 @@
 import { createSeededNoise } from "./noise";
-import { generateTerrain, generateHighResPatch, TerrainMap, TerrainCell } from "./terrain";
+import { generateTerrain, TerrainMap, TerrainCell } from "./terrain";
 import { GEOLOGY_INFO } from "./geology";
 import {
   renderTerrainToBuffer,
+  bakeVegetationNoise,
   renderViewport,
   renderHighResViewport,
   renderLegend,
@@ -13,10 +14,10 @@ import {
 // --- State ---
 let currentTerrain: TerrainMap | null = null;
 let currentBuffer: ImageData | null = null;
-let currentNoise: ReturnType<typeof createSeededNoise> | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
+let showVegetation = false;
 
-// --- High-res cache ---
+// --- High-res patch cache (buffer only — terrain lives in the worker) ---
 interface HighResCache {
   tier: 2 | 3;
   resScale: number;
@@ -24,10 +25,50 @@ interface HighResCache {
   y0: number;
   x1: number;
   y1: number;
-  terrain: TerrainMap;
   buffer: ImageData;
 }
 let highResCache: HighResCache | null = null;
+
+// --- Patch worker ---
+const patchWorker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+let workerReady = false;
+let pendingRequestId = 0;
+/** Coarse bounds of the patch currently being computed in the worker. */
+let pendingBounds: { x0: number; y0: number; x1: number; y1: number } | null = null;
+
+type WorkerResponse =
+  | { type: "ready" }
+  | { type: "notReady"; requestId: number }
+  | { type: "patch"; rawBuffer: ArrayBuffer; width: number; height: number;
+      x0: number; y0: number; x1: number; y1: number;
+      resScale: number; tier: 2 | 3; requestId: number };
+
+patchWorker.onmessage = (e: MessageEvent<WorkerResponse>) => {
+  const msg = e.data;
+
+  if (msg.type === "ready") {
+    workerReady = true;
+    // If we're already zoomed in and waiting, trigger a patch request now.
+    if (getZoomTier(viewport.zoom) > 1 && !highResCache) render();
+
+  } else if (msg.type === "notReady") {
+    // Worker wasn't ready; it will send "ready" soon, which triggers render().
+
+  } else if (msg.type === "patch") {
+    if (msg.requestId !== pendingRequestId) return; // stale result — discard
+    pendingBounds = null;
+    const imageData = new ImageData(
+      new Uint8ClampedArray(msg.rawBuffer), msg.width, msg.height,
+    );
+    highResCache = {
+      tier: msg.tier,
+      resScale: msg.resScale,
+      x0: msg.x0, y0: msg.y0, x1: msg.x1, y1: msg.y1,
+      buffer: imageData,
+    };
+    render();
+  }
+};
 
 // --- Map dimensions ---
 const MAP_WIDTH = 300;
@@ -42,6 +83,7 @@ const canvas = document.getElementById("terrain") as HTMLCanvasElement;
 const seedInput = document.getElementById("seed") as HTMLInputElement;
 const generateBtn = document.getElementById("generate") as HTMLButtonElement;
 const randomBtn = document.getElementById("random") as HTMLButtonElement;
+const vegCheckbox = document.getElementById("vegetation") as HTMLInputElement;
 const legendContainer = document.getElementById("legend") as HTMLElement;
 const cursorInfo = document.getElementById("cursor-info") as HTMLElement;
 const zoomInfo = document.getElementById("zoom-info") as HTMLElement;
@@ -103,44 +145,51 @@ function render(): void {
 
   if (tier === 1) {
     highResCache = null;
+    pendingBounds = null;
     renderViewport(canvas, currentBuffer, currentTerrain, viewport);
     updateZoomDisplay();
     return;
   }
 
-  if (!currentNoise) return;
-
   const resScale = tier === 2 ? 8 : 16;
   const bounds = computePatchBounds(currentTerrain, viewport);
 
-  const needsNewCache =
-    !highResCache ||
-    highResCache.tier !== tier ||
-    bounds.viewSx < highResCache.x0 ||
-    bounds.viewSy < highResCache.y0 ||
-    bounds.viewSx + bounds.viewW > highResCache.x1 ||
-    bounds.viewSy + bounds.viewH > highResCache.y1;
+  const cacheValid =
+    highResCache !== null &&
+    highResCache.tier === tier &&
+    bounds.viewSx >= highResCache.x0 &&
+    bounds.viewSy >= highResCache.y0 &&
+    bounds.viewSx + bounds.viewW <= highResCache.x1 &&
+    bounds.viewSy + bounds.viewH <= highResCache.y1;
 
-  if (needsNewCache) {
-    const patch = generateHighResPatch(
-      currentTerrain,
-      currentNoise,
-      bounds.x0,
-      bounds.y0,
-      bounds.x1 - bounds.x0,
-      bounds.y1 - bounds.y0,
-      resScale
-    );
-    highResCache = {
-      tier,
-      resScale,
-      x0: bounds.x0,
-      y0: bounds.y0,
-      x1: bounds.x1,
-      y1: bounds.y1,
-      terrain: patch,
-      buffer: renderTerrainToBuffer(patch),
-    };
+  if (!cacheValid) {
+    // Progressive fallback: show the coarse buffer immediately so the map is
+    // never blank while the worker computes the fine patch.
+    renderViewport(canvas, currentBuffer, currentTerrain, viewport);
+    updateZoomDisplay();
+
+    // Only send a new request if the viewport has moved outside the patch the
+    // worker is already computing — avoids flooding it during fast panning.
+    const needsNewRequest =
+      !pendingBounds ||
+      bounds.viewSx < pendingBounds.x0 ||
+      bounds.viewSy < pendingBounds.y0 ||
+      bounds.viewSx + bounds.viewW > pendingBounds.x1 ||
+      bounds.viewSy + bounds.viewH > pendingBounds.y1;
+
+    if (needsNewRequest && workerReady) {
+      pendingRequestId++;
+      pendingBounds = { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1, y1: bounds.y1 };
+      patchWorker.postMessage({
+        type: "patch",
+        x0: bounds.x0, y0: bounds.y0,
+        w: bounds.x1 - bounds.x0,
+        h: bounds.y1 - bounds.y0,
+        resScale, showVegetation,
+        requestId: pendingRequestId,
+      });
+    }
+    return;
   }
 
   renderHighResViewport(canvas, highResCache!, viewport, currentTerrain);
@@ -155,35 +204,12 @@ function updateZoomDisplay(): void {
   }
 }
 
-// --- Cell lookup respecting high-res cache ---
+// --- Cell lookup ---
+// Fine terrain lives in the worker, so cursor inspection always uses the
+// coarse cell. Geology and coast/river status are identical; altitude is
+// within ~30 m of the fine value, which is imperceptible in the tooltip.
 function getHoveredCell(clientX: number, clientY: number): TerrainCell | null {
   if (!currentTerrain) return null;
-
-  if (highResCache) {
-    // Reconstruct fractional coarse position for sub-cell precision
-    const rect = canvas.getBoundingClientRect();
-    const baseScale = Math.min(
-      canvas.width / currentTerrain.width,
-      canvas.height / currentTerrain.height
-    );
-    const scale = baseScale * viewport.zoom;
-    const viewW = canvas.width / scale;
-    const viewH = canvas.height / scale;
-    let sx = Math.max(0, Math.min(currentTerrain.width  - viewW, viewport.cx - viewW / 2));
-    let sy = Math.max(0, Math.min(currentTerrain.height - viewH, viewport.cy - viewH / 2));
-
-    const fracCoarseX = sx + (clientX - rect.left) * (canvas.width  / rect.width)  / scale;
-    const fracCoarseY = sy + (clientY - rect.top)  * (canvas.height / rect.height) / scale;
-
-    const fx = Math.floor((fracCoarseX - highResCache.x0) * highResCache.resScale);
-    const fy = Math.floor((fracCoarseY - highResCache.y0) * highResCache.resScale);
-    const t = highResCache.terrain;
-    if (fx >= 0 && fx < t.width && fy >= 0 && fy < t.height) {
-      return t.cells[fy][fx];
-    }
-  }
-
-  // Fallback: coarse cell
   const pos = canvasToTerrain(canvas, currentTerrain, viewport, clientX, clientY);
   if (!pos) return null;
   return currentTerrain.cells[pos.y][pos.x];
@@ -194,10 +220,14 @@ function generate(seed: string): void {
   const startTime = performance.now();
 
   const noise = createSeededNoise(seed);
-  currentNoise = noise;
   currentTerrain = generateTerrain(noise, MAP_WIDTH, MAP_HEIGHT, seed);
-  currentBuffer = renderTerrainToBuffer(currentTerrain);
+  bakeVegetationNoise(currentTerrain);
+  currentBuffer = renderTerrainToBuffer(currentTerrain, showVegetation);
   highResCache = null;
+  pendingBounds = null;
+  pendingRequestId++; // invalidate any in-flight patch from the previous map
+  workerReady = false;
+  patchWorker.postMessage({ type: "prepare", seed });
 
   // Reset viewport to show whole map
   viewport = {
@@ -221,6 +251,18 @@ randomBtn.addEventListener("click", () => {
   const randomSeed = Math.random().toString(36).substring(2, 10);
   seedInput.value = randomSeed;
   generate(randomSeed);
+});
+
+vegCheckbox.addEventListener("change", () => {
+  showVegetation = vegCheckbox.checked;
+  if (!currentTerrain) return;
+  // Coarse buffer re-renders from baked noise — fast, no noise recomputation.
+  currentBuffer = renderTerrainToBuffer(currentTerrain, showVegetation);
+  // Invalidate the fine cache; render() will show coarse fallback immediately
+  // and dispatch a new patch request to the worker with updated showVegetation.
+  highResCache = null;
+  pendingBounds = null;
+  render();
 });
 
 // --- Zoom with scroll wheel ---

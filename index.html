@@ -77,6 +77,22 @@
       background: #3e3a32;
     }
 
+    .controls .veg-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: #7a7268;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .controls .veg-toggle input[type="checkbox"] {
+      width: auto;
+      accent-color: #6a8a50;
+      cursor: pointer;
+    }
+
     canvas {
       border: 1px solid #2a2620;
       max-width: 100%;
@@ -139,6 +155,10 @@
     <input type="text" id="seed" value="barrow" />
     <button id="generate">Generate</button>
     <button id="random">Random Seed</button>
+    <label class="veg-toggle">
+      <input type="checkbox" id="vegetation" />
+      Vegetation
+    </label>
   </div>
   <canvas id="terrain"></canvas>
   <div class="cursor-info" id="cursor-info"></div>

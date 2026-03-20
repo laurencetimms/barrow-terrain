@@ -1,12 +1,243 @@
-import { TerrainMap } from "./terrain";
+import { TerrainMap, TerrainCell } from "./terrain";
 import { GEOLOGY_INFO, GeologyType } from "./geology";
+import { createSeededNoise, layeredNoise } from "./noise";
+
+// ---------------------------------------------------------------------------
+// Vegetation overlay
+// ---------------------------------------------------------------------------
+
+// Per-geology vegetation noise parameters, sampled in nx/ny world-space (0..1).
+// Scale controls patch size (higher = smaller patches).
+// Offset decorrelates the pattern between geology types.
+// Must stay in sync with bakeVegetationNoise below.
+const VEG_NOISE_SCALE: Partial<Record<GeologyType, number>> = {
+  [GeologyType.Clay]:      4,
+  [GeologyType.Limestone]: 7,
+  [GeologyType.Sandstone]: 7,
+  [GeologyType.Slate]:     7,
+  [GeologyType.Chalk]:     9,
+  [GeologyType.Granite]:   12,
+  [GeologyType.Glacial]:   14,
+};
+
+const VEG_NOISE_OFFSET: Partial<Record<GeologyType, number>> = {
+  [GeologyType.Chalk]:     50,
+  [GeologyType.Limestone]: 55,
+  [GeologyType.Sandstone]: 60,
+  [GeologyType.Granite]:   65,
+  [GeologyType.Slate]:     70,
+  [GeologyType.Clay]:      75,
+  [GeologyType.Glacial]:   80,
+};
+
+/**
+ * Pre-bakes per-cell vegetation noise into terrain.vegNoise.
+ * Each cell gets a single scalar [-1..1] using the correct scale and offset
+ * for its geology type. After baking, renderTerrainToBuffer does fast array
+ * lookups instead of calling layeredNoise per cell during rendering.
+ * Call once after terrain generation; reuse across multiple renders.
+ */
+export function bakeVegetationNoise(terrain: TerrainMap): void {
+  const { width, height, cells, seed } = terrain;
+  const vegNoise2D = createSeededNoise(seed + "\0veg").noise2D;
+  const data = new Float32Array(width * height);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      const scale = VEG_NOISE_SCALE[cell.geology];
+      if (scale === undefined) { data[y * width + x] = 0; continue; }
+      const offset = VEG_NOISE_OFFSET[cell.geology]!;
+      data[y * width + x] = layeredNoise(
+        vegNoise2D,
+        cell.nx + offset,
+        (1 - cell.ny) + offset,
+        4, 0.5, 2.0, scale,
+      );
+    }
+  }
+
+  terrain.vegNoise = data;
+}
+
+/**
+ * Computes a vegetation colour and blend factor for a land cell.
+ * Returns null for Water and Ice (no vegetation).
+ *
+ * vn is the pre-baked vegetation noise value for this cell (from terrain.vegNoise).
+ * The blend factor falls off with altitude so exposed ridges show bare rock.
+ */
+function computeVegetationColor(
+  cell: TerrainCell,
+  cells: TerrainCell[][],
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  vn: number,
+): { r: number; g: number; b: number; blend: number } | null {
+  const { geology, altitude, nx } = cell;
+
+  if (geology === GeologyType.Water || geology === GeologyType.Ice) return null;
+
+  // A cell is "near a river" if it or a 4-cardinal neighbour carries flow.
+  // River cells themselves get the blue river overlay on top, so riparian
+  // vegetation mainly colours the adjacent bank cells.
+  const nearRiver =
+    cell.riverFlow > 0 ||
+    (x > 0 && cells[y][x - 1].riverFlow > 0) ||
+    (x < width - 1 && cells[y][x + 1].riverFlow > 0) ||
+    (y > 0 && cells[y - 1][x].riverFlow > 0) ||
+    (y < height - 1 && cells[y + 1][x].riverFlow > 0);
+
+  const seaLevel = 0.22;
+  const treeline = 0.45;
+
+  // Altitude-based blend: lush forest at low altitude, bare rock at peaks.
+  let blend: number;
+  if (altitude < treeline) {
+    const t = Math.max(0, (altitude - seaLevel) / (treeline - seaLevel));
+    blend = 0.85 - t * 0.25; // 0.85 at coast → 0.60 at treeline
+  } else {
+    const t = Math.min(1, (altitude - treeline) / (1.0 - treeline));
+    blend = 0.30 - t * 0.25; // 0.30 at treeline → 0.05 at summits
+  }
+
+  let vegR: number, vegG: number, vegB: number;
+
+  switch (geology) {
+    case GeologyType.Chalk: {
+      // Open and light — least forested geology. Large grassland patches with
+      // scattered scrub and dark yew in sheltered combes at low altitude.
+      if (nearRiver && cell.riverFlow === 0) {
+        vegR = 110; vegG = 155; vegB = 55; // riparian: brighter green
+      } else if (altitude < 0.30 && vn < -0.35) {
+        vegR = 55; vegG = 95; vegB = 40;  // sheltered combes: dark yew/hazel
+        blend *= 0.80;
+      } else if (vn > 0.30) {
+        vegR = 120; vegG = 145; vegB = 70; // scattered scrub patches
+      } else {
+        vegR = 190; vegG = 200; vegB = 120; // open grassland: pale green-gold
+      }
+      if (altitude > 0.38) blend *= 0.55; // exposed chalk — minimal cover
+      break;
+    }
+
+    case GeologyType.Limestone: {
+      // Strong altitude contrast: green valley floors, grey exposed plateaux.
+      if (altitude > 0.40) {
+        // Bare limestone pavement: geology shows through with just a hint of colour
+        vegR = 165; vegG = 170; vegB = 145;
+        blend = Math.min(blend, 0.22);
+      } else if (nearRiver || altitude < 0.30) {
+        // Valley floor: lush ash woodland
+        vegR = 65; vegG = 110; vegB = 40;
+        blend = Math.min(0.88, blend * 1.10);
+      } else {
+        // Dale slopes: mixed woodland with patchy rocky outcrops
+        const t = (altitude - 0.30) / (0.40 - 0.30);
+        vegR = Math.round(65 + t * 35);
+        vegG = Math.round(110 + t * 18);
+        vegB = Math.round(40 + t * 22);
+        if (vn > 0.25) blend *= 0.55; // rocky outcrops show through
+      }
+      break;
+    }
+
+    case GeologyType.Sandstone: {
+      // Warmer, more purple-brown palette. Heather moorland dominant,
+      // birch-pine in shelter, alder-willow along streams.
+      if (nearRiver && cell.riverFlow === 0) {
+        vegR = 110; vegG = 160; vegB = 45; // alder-willow: bright yellow-green
+      } else if (vn > 0.22) {
+        vegR = 65; vegG = 90; vegB = 72;   // birch/pine: slightly blue-green
+      } else {
+        vegR = 128; vegG = 82; vegB = 112; // heathland: purple-brown heather
+      }
+      break;
+    }
+
+    case GeologyType.Granite: {
+      // Bare, wind-scoured moorland dominant. Small dark oakwood patches in
+      // sheltered valleys. Lichen-toned rock at high altitude.
+      if (altitude > 0.50) {
+        vegR = 162; vegG = 155; vegB = 110; // lichen on high rock: pale yellow-grey
+        blend = Math.min(blend, 0.28);
+      } else if (altitude < 0.36 && vn < -0.38) {
+        vegR = 38; vegG = 72; vegB = 28;   // stunted valley oakwood: very dark, patchy
+        blend *= 0.85;
+      } else if (nearRiver && altitude < 0.38) {
+        vegR = 80; vegG = 120; vegB = 50;  // riparian scrub in valley bottoms
+      } else {
+        vegR = 105; vegG = 100; vegB = 42; // moorland: olive-brown tussock/bog
+      }
+      if (altitude > treeline) blend *= 0.45; // very exposed above treeline
+      break;
+    }
+
+    case GeologyType.Slate: {
+      // Signature contrast: impenetrably dark valley forest vs bare ridge moorland.
+      if (altitude > treeline) {
+        vegR = 96; vegG = 96; vegB = 42;   // bare moorland on ridges
+        blend = Math.min(blend, 0.42);
+      } else if (altitude < 0.35 || vn < -0.08) {
+        vegR = 24; vegG = 68; vegB = 35;   // dense oak-hazel: very dark green
+        blend = Math.min(0.90, blend * 1.15);
+      } else {
+        vegR = 38; vegG = 80; vegB = 42;   // fern/moss on slopes
+      }
+      break;
+    }
+
+    case GeologyType.Clay: {
+      // Darkest, densest vegetation. Primeval wildwood dominates. Carr near
+      // rivers. Golden reed beds in the eastern water-lands at very low altitude.
+      if (altitude < 0.27 && nx > 0.65) {
+        // Eastern water-lands: reed beds, warm golden-brown
+        vegR = 138; vegG = 122; vegB = 45;
+        blend = 0.75;
+      } else if (nearRiver && cell.riverFlow === 0) {
+        vegR = 52; vegG = 95; vegB = 45;   // alder-willow carr: lighter, wetter
+        blend = Math.min(0.90, blend * 1.05);
+      } else if (vn > 0.28) {
+        vegR = 55; vegG = 88; vegB = 40;   // natural canopy gaps, clearings
+      } else {
+        vegR = 28; vegG = 58; vegB = 28;   // primeval wildwood: very dark green
+        blend = Math.min(0.92, blend * 1.12);
+      }
+      break;
+    }
+
+    case GeologyType.Glacial: {
+      // Pioneer vegetation only. Barely-there green over raw rock, slightly
+      // denser (higher blend) further from the ice at lower altitude.
+      if (vn > 0.30) {
+        vegR = 120; vegG = 138; vegB = 95;  // scattered birch/willow: pale green
+      } else {
+        vegR = 150; vegG = 158; vegB = 115; // pioneer moss/lichen: barely-there
+      }
+      blend = Math.min(blend, 0.40);
+      if (altitude < 0.35) blend = Math.min(blend * 1.3, 0.45); // further from ice
+      break;
+    }
+
+    default:
+      return null;
+  }
+
+  return { r: vegR, g: vegG, b: vegB, blend: Math.max(0, Math.min(1, blend)) };
+}
 
 // --- Full-resolution offscreen rendering ---
 
-export function renderTerrainToBuffer(terrain: TerrainMap): ImageData {
-  const { width, height, cells } = terrain;
+export function renderTerrainToBuffer(terrain: TerrainMap, showVegetation = false): ImageData {
+  const { width, height, cells, vegNoise } = terrain;
   const imageData = new ImageData(width, height);
   const data = imageData.data;
+
+  // Use pre-baked noise for vegetation — fast array lookup instead of per-cell
+  // layeredNoise calls. If somehow not baked, vegetation is silently skipped.
+  const useVegetation = showVegetation && vegNoise !== undefined;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -38,6 +269,19 @@ export function renderTerrainToBuffer(terrain: TerrainMap): ImageData {
         r = Math.min(255, r + 15);
         g = Math.min(255, g + 12);
         b = Math.min(255, b + 8);
+      }
+
+      // Vegetation overlay — blended before hillshading so terrain shape
+      // is applied on top, giving the vegetation colour depth and relief.
+      if (useVegetation) {
+        const veg = computeVegetationColor(
+          cell, cells, x, y, width, height, vegNoise![y * width + x],
+        );
+        if (veg) {
+          r = r * (1 - veg.blend) + veg.r * veg.blend;
+          g = g * (1 - veg.blend) + veg.g * veg.blend;
+          b = b * (1 - veg.blend) + veg.b * veg.blend;
+        }
       }
 
       // Hillshading — simulated NW light source at 45° elevation.
@@ -181,7 +425,6 @@ export function renderHighResViewport(
     resScale: number;
     x0: number;
     y0: number;
-    terrain: TerrainMap;
     buffer: ImageData;
   },
   viewport: Viewport,
@@ -196,7 +439,7 @@ export function renderHighResViewport(
   ctx.fillStyle = "#1c1a17";
   ctx.fillRect(0, 0, cw, ch);
 
-  const offscreen = new OffscreenCanvas(cache.terrain.width, cache.terrain.height);
+  const offscreen = new OffscreenCanvas(cache.buffer.width, cache.buffer.height);
   const offCtx = offscreen.getContext("2d");
   if (!offCtx) return;
   offCtx.putImageData(cache.buffer, 0, 0);
