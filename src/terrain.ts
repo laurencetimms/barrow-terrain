@@ -1,6 +1,14 @@
 import { NoiseGenerator, layeredNoise } from "./noise";
 import { GeologyType } from "./geology";
 
+export type WaterLandsSubType =
+  | 'openWater'
+  | 'reedBed'
+  | 'mudFlat'
+  | 'raisedIsland'
+  | 'carrWoodland'
+  | 'tidalChannel';
+
 export interface TerrainCell {
   altitude: number; // 0..1 where 0 is sea level, 1 is highest peak
   geology: GeologyType;
@@ -9,6 +17,8 @@ export interface TerrainCell {
   // Normalised position in the world (0..1)
   nx: number; // 0 = west, 1 = east
   ny: number; // 0 = south, 1 = north
+  /** Sub-type within the eastern water-lands zone. Only set for cells in that zone. */
+  waterLandsType?: WaterLandsSubType;
 }
 
 export interface TerrainMap {
@@ -244,6 +254,16 @@ function generateAltitude(
   const waterLandsLat = 1 - Math.pow((wny - 0.45) * 2.2, 2) * 0.5;
   const waterLandsAlt = -waterLandsEast * Math.max(0, waterLandsLat) * 0.30;
 
+  // ── Great Sandbank (fixed landmark island within the water-lands) ─────────
+  // Centred roughly at (nx 0.85, ny 0.45). Noise-warped radius gives an
+  // irregular, believable outline. Large enough to be visible at coarse zoom.
+  const sandDx = wnx - 0.855;
+  const sandDy = wny - 0.455;
+  const sandWarpR = layeredNoise(noise2D, gx + 15000, gy + 15000, 3, 0.5, 2.0, 0.030) * 0.035;
+  const sandRadius = 0.060 + sandWarpR;
+  const sandDistSq = sandDx * sandDx + sandDy * sandDy;
+  const sandBump = Math.max(0, 1 - sandDistSq / (sandRadius * sandRadius)) * 0.14;
+
   // ── Ice margin depression ─────────────────────────────────────────────────
   // Slight basin from isostatic loading under the ice sheet
   const iceMargin = Math.max(0, (wny - 0.84) / 0.16);
@@ -274,12 +294,44 @@ function generateAltitude(
     + Math.max(spineHeight, branchHeight)
     + southAlt
     + eastAlt + waterLandsAlt
+    + sandBump
     + iceAlt
     + seaAlt
     - fault1Depth - fault2Depth
     - estDepth - sl1Depth - sl2Depth;
 
   return Math.max(0, Math.min(1, altitude));
+}
+
+// ---------------------------------------------------------------------------
+// Water-lands zone definition
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the given normalised position (nx, ny) falls within the
+ * eastern water-lands zone. The zone is bounded:
+ *   West  — a noise-warped line around nx 0.62-0.70
+ *   South — noise-warped around ny 0.08 (south of this = normal chalk coast)
+ *   North — noise-warped around ny 0.66 (north of this = normal glacial coast)
+ *   East  — open sea edge
+ *
+ * gx/gy are the raw grid coordinates used for noise sampling (same domain
+ * as the rest of the noise in this module).
+ */
+function isInWaterLandsZone(
+  nx: number, ny: number,
+  noise2D: (x: number, y: number) => number,
+  gx: number, gy: number
+): boolean {
+  const southWarp = layeredNoise(noise2D, gx * 0.008 + 13000, gy * 0.008 + 13000, 3, 0.5, 2.0, 1.0) * 0.022;
+  const northWarp = layeredNoise(noise2D, gx * 0.008 + 14000, gy * 0.008 + 14000, 3, 0.5, 2.0, 1.0) * 0.022;
+  if (ny < 0.08 + southWarp || ny > 0.66 + northWarp) return false;
+
+  // West boundary — matches the waterLandsBoundary used in classifyGeology
+  const westBoundary = 0.62
+    + layeredNoise(noise2D, gy * 0.008 + 11000, gx * 0.008 + 11000, 3, 0.5, 2.0, 1.0) * 0.06
+    + warpCoord(noise2D, gx, gy, 11100, 11200, 0.007, 0.05);
+  return nx > westBoundary;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +599,10 @@ function markCoasts(
 function fixCoastalGeology(
   cells: TerrainCell[][],
   width: number,
-  height: number
+  height: number,
+  noise: NoiseGenerator,
+  coarseWidth: number,
+  coarseHeight: number
 ): void {
   // Geology types that can override a misclassified coastal clay cell.
   // Glacial is intentionally excluded — glacial debris shores are correctly
@@ -561,11 +616,18 @@ function fixCoastalGeology(
   ]);
 
   const RADIUS = 8;
+  const { noise2D } = noise;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       if (!cells[y][x].isCoast) continue;
       if (cells[y][x].geology !== GeologyType.Clay) continue;
+
+      // Water-lands zone: clay all the way to the water's edge — leave as-is.
+      const { nx, ny } = cells[y][x];
+      const gx = nx * coarseWidth;
+      const gy = (1 - ny) * coarseHeight;
+      if (isInWaterLandsZone(nx, ny, noise2D, gx, gy)) continue;
 
       // Tally hard-geology cells within the radius, weighting closer cells
       // more heavily so the geology directly behind this coastal cell wins
@@ -591,6 +653,89 @@ function fixCoastalGeology(
         if (score > bestScore) { bestScore = score; best = geo; }
       }
       cells[y][x].geology = best;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Water-lands sub-type classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Post-processing pass: cells within the eastern water-lands zone are
+ * classified into one of several sub-types (openWater, reedBed, mudFlat,
+ * raisedIsland, carrWoodland, tidalChannel) using multiple noise layers
+ * at different scales and an east-west wetness gradient.
+ *
+ * coarseWidth/coarseHeight are the dimensions of the coarse map — used to
+ * convert normalised nx/ny back into grid coordinates for noise sampling
+ * (which uses the same gx/gy domain as the rest of terrain generation).
+ */
+function classifyWaterLands(
+  cells: TerrainCell[][],
+  width: number,
+  height: number,
+  noise: NoiseGenerator,
+  coarseWidth: number,
+  coarseHeight: number
+): void {
+  const { noise2D } = noise;
+  const seaLevel = 0.22;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      const { nx, ny } = cell;
+      const gx = nx * coarseWidth;
+      const gy = (1 - ny) * coarseHeight;
+
+      if (!isInWaterLandsZone(nx, ny, noise2D, gx, gy)) continue;
+      if (cell.geology !== GeologyType.Clay && cell.geology !== GeologyType.Water) continue;
+
+      // E-W gradient: 0 at the western boundary (~0.65), 1 fully east (~0.92)
+      const ewWetness = Math.min(1, Math.max(0, (nx - 0.65) / 0.27));
+
+      // Large-scale (broad bodies of water vs land masses)
+      const largeNoise = layeredNoise(noise2D, gx + 20000, gy + 20000, 4, 0.5, 2.0, 0.018);
+      // Medium-scale (reed/mud/channel mosaic — the visual signature of the water-lands)
+      const medNoise   = layeredNoise(noise2D, gx + 21000, gy + 21000, 4, 0.5, 2.0, 0.052);
+      // Fine-scale (smallest features: channels between reed clumps, small pools)
+      const fineNoise  = layeredNoise(noise2D, gx + 22000, gy + 22000, 3, 0.5, 2.0, 0.130);
+
+      const altAboveSea = cell.altitude - seaLevel;
+
+      if (cell.geology === GeologyType.Water) {
+        // Tidal channels: narrow troughs detected by aligned medium + fine troughs,
+        // more common in the middle zone, rare in the deepest open water.
+        if (medNoise < -0.30 && fineNoise < -0.20 && ewWetness < 0.85) {
+          cell.waterLandsType = 'tidalChannel';
+        } else {
+          cell.waterLandsType = 'openWater';
+        }
+      } else {
+        // Clay cells — classify by altitude above sea level + noise texture
+        // Combined wetness: higher ewWetness + higher largeNoise = wetter interior
+        const wetScore = largeNoise * 0.45 + ewWetness * 0.40 + medNoise * 0.15;
+
+        if (altAboveSea < 0.013) {
+          // Just above sea: mud flat or reed bed
+          cell.waterLandsType = medNoise > 0.08 ? 'reedBed' : 'mudFlat';
+        } else if (altAboveSea < 0.030) {
+          // Reed beds dominant here; mud at lower-wetness patches
+          cell.waterLandsType = wetScore < -0.12 ? 'mudFlat' : 'reedBed';
+        } else if (altAboveSea < 0.060) {
+          // Transition zone: carr woodland on wetter western margins and
+          // larger interior land masses; reed elsewhere
+          if (nx < 0.72 || largeNoise > 0.18) {
+            cell.waterLandsType = 'carrWoodland';
+          } else {
+            cell.waterLandsType = 'reedBed';
+          }
+        } else {
+          // Higher ground within the wetlands: raised island
+          cell.waterLandsType = 'raisedIsland';
+        }
+      }
     }
   }
 }
@@ -827,7 +972,8 @@ export function generateHighResPatch(
   );
 
   markCoasts(cells, fineW, fineH);
-  fixCoastalGeology(cells, fineW, fineH);
+  fixCoastalGeology(cells, fineW, fineH, noise, coarseMap.width, coarseMap.height);
+  classifyWaterLands(cells, fineW, fineH, noise, coarseMap.width, coarseMap.height);
 
   return { width: fineW, height: fineH, cells, seed: coarseMap.seed };
 }
@@ -867,7 +1013,8 @@ export function generateTerrain(
 
   generateRivers(cells, width, height);
   markCoasts(cells, width, height);
-  fixCoastalGeology(cells, width, height);
+  fixCoastalGeology(cells, width, height, noise, width, height);
+  classifyWaterLands(cells, width, height, noise, width, height);
 
   return { width, height, cells, seed };
 }

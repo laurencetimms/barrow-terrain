@@ -264,6 +264,45 @@ export function renderTerrainToBuffer(terrain: TerrainMap, showVegetation = fals
         b = baseColor.b * depthFactor;
       }
 
+      // Water-lands sub-type colour override — applied before coast highlight
+      // and hillshading so those effects add depth and variation on top.
+      // vegNoise (baked for Clay cells) provides fine-grained colour variation.
+      if (cell.waterLandsType) {
+        const vn = vegNoise ? vegNoise[y * width + x] : 0;
+        switch (cell.waterLandsType) {
+          case 'openWater':
+            // Warm grey-blue; lighter and browner than deep sea
+            r = 106 + vn * 10; g = 128 + vn * 8;  b = 112 + vn * 6;
+            break;
+          case 'tidalChannel':
+            // Dark threading water — narrower and darker than open water
+            r = 80  + vn * 7;  g = 110 + vn * 7;  b = 96  + vn * 5;
+            break;
+          case 'reedBed':
+            // Warm golden-green — the visual signature of the water-lands
+            r = 138 + vn * 14; g = 136 + vn * 10; b = 72  + vn * 8;
+            break;
+          case 'mudFlat':
+            // Warm grey-brown, darker than sand, lighter than water
+            r = 122 + vn * 12; g = 112 + vn * 9;  b = 96  + vn * 7;
+            break;
+          case 'carrWoodland':
+            // Pale wet green, lighter and yellower than clay forest
+            r = 90  + vn * 12; g = 122 + vn * 12; b = 72  + vn * 8;
+            break;
+          case 'raisedIsland':
+            // Higher ground: carr woodland margins shading to scrub/grassland
+            if (vn > 0.2) {
+              // Grassland / scrub on higher, drier parts
+              r = 108 + vn * 14; g = 140 + vn * 10; b = 72 + vn * 8;
+            } else {
+              // Carr woodland on wetter margins
+              r = 88  + vn * 12; g = 120 + vn * 12; b = 68 + vn * 8;
+            }
+            break;
+        }
+      }
+
       // Coast highlight
       if (cell.isCoast) {
         r = Math.min(255, r + 15);
@@ -273,7 +312,8 @@ export function renderTerrainToBuffer(terrain: TerrainMap, showVegetation = fals
 
       // Vegetation overlay — blended before hillshading so terrain shape
       // is applied on top, giving the vegetation colour depth and relief.
-      if (useVegetation) {
+      // Skipped for water-lands cells (their colour is already set above).
+      if (useVegetation && !cell.waterLandsType) {
         const veg = computeVegetationColor(
           cell, cells, x, y, width, height, vegNoise![y * width + x],
         );
