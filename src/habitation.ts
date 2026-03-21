@@ -726,9 +726,19 @@ export interface Ford {
   y: number;
 }
 
+export type AbandonedReason = 'waterRose' | 'iceAdvanced' | 'landMarginal';
+
+export interface AbandonedSettlement {
+  x:              number;
+  y:              number;
+  historicalSize: SettlementSize;
+  reason:         AbandonedReason;
+}
+
 export interface SettlementData {
   settlements: Settlement[];
   fords:       Ford[];
+  abandoned:   AbandonedSettlement[];
 }
 
 // ---------------------------------------------------------------------------
