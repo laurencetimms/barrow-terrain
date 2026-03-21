@@ -2322,3 +2322,136 @@ export function computeHuntingCircuits(
 
   return { circuits };
 }
+
+// ---------------------------------------------------------------------------
+// Step 10: Validation
+// ---------------------------------------------------------------------------
+
+export interface ValidationReport {
+  /** Settlements that were isolated and received a new connecting path. */
+  connectivityFixes: number;
+  totalPopulation:   number;
+  populationInRange: boolean;
+  /** Regions in the 4×6 grid that have no significant sacred site. */
+  coverageGaps:      { rgx: number; rgy: number }[];
+  densityGradientOk: boolean;
+  summary:           string[];
+}
+
+export function validateHabitation(
+  terrain:        TerrainMap,
+  settlementData: SettlementData,
+  pathNetwork:    PathNetwork,
+  sacredData:     SacredData,
+): ValidationReport {
+  const { width: w, height: h, cells } = terrain;
+  const { settlements, fords } = settlementData;
+  const { paths } = pathNetwork;
+  const summary: string[] = [];
+
+  // ── 1. CONNECTIVITY CHECK ─────────────────────────────────────────────────
+  const n = settlements.length;
+  const adj: Set<number>[] = Array.from({ length: n }, () => new Set<number>());
+  for (const p of paths) {
+    adj[p.fromIdx].add(p.toIdx);
+    adj[p.toIdx].add(p.fromIdx);
+  }
+
+  // BFS from settlement 0; find all reachable.
+  const reached = new Uint8Array(n);
+  const bfsQ: number[] = [];
+  if (n > 0) {
+    reached[0] = 1; bfsQ.push(0);
+    for (let qi = 0; qi < bfsQ.length; qi++)
+      for (const nb of adj[bfsQ[qi]])
+        if (!reached[nb]) { reached[nb] = 1; bfsQ.push(nb); }
+  }
+
+  const fordSet = new Set(fords.map(f => f.y * w + f.x));
+  const astar   = new AStarSolver(w, h);
+  let connectivityFixes = 0;
+
+  for (let si = 0; si < n; si++) {
+    if (reached[si]) continue;
+    // A* to nearest reachable settlement.
+    let bestDist = Infinity, bestIdx = -1;
+    for (let ri = 0; ri < n; ri++) {
+      if (!reached[ri]) continue;
+      const d = Math.hypot(settlements[si].x - settlements[ri].x,
+                           settlements[si].y - settlements[ri].y);
+      if (d < bestDist) { bestDist = d; bestIdx = ri; }
+    }
+    if (bestIdx < 0) continue;
+    const from = settlements[si], to = settlements[bestIdx];
+    const route = astar.solve(terrain, fordSet, from.x, from.y, to.x, to.y, 12000);
+    if (!route) continue;
+    const traffic = (from.population + to.population) * 0.5;
+    paths.push({ cells: route, traffic, fromIdx: si, toIdx: bestIdx });
+    adj[si].add(bestIdx); adj[bestIdx].add(si);
+    // Re-propagate reachability from the newly connected settlement.
+    reached[si] = 1; bfsQ.length = 0; bfsQ.push(si);
+    for (let qi = 0; qi < bfsQ.length; qi++)
+      for (const nb of adj[bfsQ[qi]])
+        if (!reached[nb]) { reached[nb] = 1; bfsQ.push(nb); }
+    connectivityFixes++;
+  }
+
+  summary.push(connectivityFixes > 0
+    ? `Connectivity: fixed ${connectivityFixes} isolated settlement(s).`
+    : 'Connectivity: all settlements reachable. ✓');
+
+  // ── 2. POPULATION CHECK ───────────────────────────────────────────────────
+  const totalPopulation = settlements.reduce((s, t) => s + t.population, 0);
+  const populationInRange = totalPopulation >= 100_000 && totalPopulation <= 250_000;
+  summary.push(populationInRange
+    ? `Population: ${totalPopulation.toLocaleString()} — in range (100k–250k). ✓`
+    : `Population: ${totalPopulation.toLocaleString()} — outside target range (100k–250k).`);
+
+  // ── 3. COVERAGE CHECK ─────────────────────────────────────────────────────
+  const RGSX = 4, RGSY = 6;
+  const sigCoverage   = new Uint8Array(RGSX * RGSY);
+  const smallCoverage = new Int32Array(RGSX * RGSY);
+
+  for (const s of sacredData.significant) {
+    const rgx = Math.min(RGSX - 1, (s.x / w * RGSX) | 0);
+    const rgy = Math.min(RGSY - 1, (s.y / h * RGSY) | 0);
+    sigCoverage[rgy * RGSX + rgx] = 1;
+  }
+  for (const s of sacredData.small) {
+    const rgx = Math.min(RGSX - 1, (s.x / w * RGSX) | 0);
+    const rgy = Math.min(RGSY - 1, (s.y / h * RGSY) | 0);
+    smallCoverage[rgy * RGSX + rgx]++;
+  }
+
+  const coverageGaps: { rgx: number; rgy: number }[] = [];
+  for (let rgy = 0; rgy < RGSY; rgy++)
+    for (let rgx = 0; rgx < RGSX; rgx++)
+      if (!sigCoverage[rgy * RGSX + rgx]) coverageGaps.push({ rgx, rgy });
+
+  if (coverageGaps.length === 0) {
+    summary.push('Sacred coverage: all 24 regions have significant sites. ✓');
+  } else {
+    const gaps = coverageGaps.map(g => `(col ${g.rgx} row ${g.rgy})`).join(', ');
+    summary.push(`Sacred coverage: ${coverageGaps.length} region(s) without significant sites: ${gaps}.`);
+  }
+
+  // Small feature density per region
+  const minSmall = Math.min(...Array.from(smallCoverage));
+  const maxSmall = Math.max(...Array.from(smallCoverage));
+  summary.push(`Small sacred features: ${minSmall}–${maxSmall} per region.`);
+
+  // ── 4. DENSITY GRADIENT CHECK ─────────────────────────────────────────────
+  let northCount = 0, southCount = 0, uplandCount = 0, lowlandCount = 0;
+  for (const s of settlements) {
+    if (s.isWaterLands) continue;
+    if (s.y < h / 2) northCount++; else southCount++;
+    if (cells[s.y][s.x].altitude >= 0.38) uplandCount++; else lowlandCount++;
+  }
+  const densityGradientOk = southCount >= northCount && lowlandCount >= uplandCount;
+  summary.push(
+    `Density: south ${southCount} vs north ${northCount}, lowland ${lowlandCount} vs upland ${uplandCount}` +
+    (densityGradientOk ? ' — gradient correct. ✓' : ' — gradient inverted.'),
+  );
+
+  return { connectivityFixes, totalPopulation, populationInRange, coverageGaps, densityGradientOk, summary };
+}

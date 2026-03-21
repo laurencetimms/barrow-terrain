@@ -10,6 +10,7 @@ import {
   computeSacredSites, SacredData,
   computeSeasonalCamps, SeasonalData,
   computeHuntingCircuits, HuntingData,
+  validateHabitation, ValidationReport,
 } from "./habitation";
 import {
   renderTerrainToBuffer,
@@ -31,6 +32,7 @@ let currentPathNetwork: PathNetwork | null = null;
 let currentSacred: SacredData | null = null;
 let currentSeasonal: SeasonalData | null = null;
 let currentHunting: HuntingData | null = null;
+let currentValidation: ValidationReport | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -304,6 +306,12 @@ function logSettlementStats(sd: SettlementData): void {
   );
 }
 
+function logValidationStats(vr: ValidationReport): void {
+  console.group('[Validation]');
+  for (const line of vr.summary) console.log(line);
+  console.groupEnd();
+}
+
 function logHuntingStats(hd: HuntingData): void {
   const { circuits } = hd;
   const sizes = circuits.map(c => c.groupSize);
@@ -402,6 +410,8 @@ function generate(seed: string): void {
   logSeasonalStats(currentSeasonal);
   currentHunting = computeHuntingCircuits(currentTerrain, currentFoodMap, currentSettlements, seed);
   logHuntingStats(currentHunting);
+  currentValidation = validateHabitation(currentTerrain, currentSettlements, currentPathNetwork, currentSacred);
+  logValidationStats(currentValidation);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map
