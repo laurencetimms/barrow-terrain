@@ -2131,3 +2131,194 @@ export function computeSeasonalCamps(
 
   return { camps };
 }
+
+// ---------------------------------------------------------------------------
+// Step 9: Hunting Group Circuits
+// ---------------------------------------------------------------------------
+
+export type HuntingSeason = 'spring' | 'summer' | 'autumn' | 'winter';
+
+export interface HuntingWaypoint {
+  x: number;
+  y: number;
+  season: HuntingSeason;
+}
+
+export interface HuntingCircuit {
+  waypoints:  HuntingWaypoint[];
+  groupSize:  number;
+  /** Routed A* path cells for the full loop. Not rendered, stored for reference. */
+  pathCells:  [number, number][];
+}
+
+export interface HuntingData {
+  circuits: HuntingCircuit[];
+}
+
+export function computeHuntingCircuits(
+  terrain:        TerrainMap,
+  foodMap:        FoodResourceMap,
+  settlementData: SettlementData,
+  seed:           string,
+): HuntingData {
+  const { width: w, height: h, cells } = terrain;
+  const { nearRiver } = foodMap;
+  const { settlements, fords } = settlementData;
+  const { random } = createSeededNoise(seed + '\0hunting');
+
+  const SEA_LEVEL = 0.22;
+  const TREELINE  = 0.45;
+  const DX4 = [-1, 1, 0, 0];
+  const DY4 = [ 0, 0,-1, 1];
+  const fi = (x: number, y: number) => y * w + x;
+
+  const fordSet = new Set(fords.map(f => fi(f.x, f.y)));
+  const astar   = new AStarSolver(w, h);
+
+  // ── Settlement distance BFS ───────────────────────────────────────────────
+  const settDist = new Int16Array(w * h).fill(32767);
+  {
+    const q: number[] = [];
+    for (const s of settlements) {
+      const i = fi(s.x, s.y);
+      if (settDist[i] === 32767) { settDist[i] = 0; q.push(i); }
+    }
+    for (let qi = 0; qi < q.length; qi++) {
+      const ci = q[qi], nd = settDist[ci] + 1;
+      if (nd > 20) continue;
+      const cx = ci % w, cy = (ci / w) | 0;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = cx + DX4[d], ny2 = cy + DY4[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const ni = fi(nx2, ny2);
+        if (settDist[ni] > nd) { settDist[ni] = nd; q.push(ni); }
+      }
+    }
+  }
+
+  // ── Circuit centre candidates: remote, granite/slate/deep-clay terrain ────
+  interface Ctr { x: number; y: number; score: number }
+  const ctrCands: Ctr[] = [];
+  for (let y = 5; y < h - 5; y += 4) {
+    for (let x = 5; x < w - 5; x += 4) {
+      const c = cells[y][x];
+      if (c.geology === GeologyType.Water || c.geology === GeologyType.Ice) continue;
+      if (c.altitude <= SEA_LEVEL) continue;
+      if (settDist[fi(x, y)] < 8) continue;
+      let geoScore: number;
+      if      (c.geology === GeologyType.Granite)  geoScore = 0.9;
+      else if (c.geology === GeologyType.Slate)    geoScore = 0.8;
+      else if (c.geology === GeologyType.Glacial)  geoScore = 0.6;
+      else if (c.geology === GeologyType.Clay && c.altitude < 0.40) geoScore = 0.5;
+      else if (c.geology === GeologyType.Sandstone) geoScore = 0.4;
+      else continue; // chalk/limestone – too settled
+      const isolation = Math.min(1, settDist[fi(x, y)] / 15);
+      ctrCands.push({ x, y, score: geoScore * 0.5 + isolation * 0.5 });
+    }
+  }
+  ctrCands.sort((a, b) => b.score - a.score);
+
+  // ── Best-cell search within a radius ──────────────────────────────────────
+  const findWaypoint = (
+    cx: number, cy: number, r: number,
+    scoreFn: (x: number, y: number) => number,
+    minScore: number,
+  ): { x: number; y: number } | null => {
+    let bestX = -1, bestY = -1, best = minScore;
+    for (let dy = -r; dy <= r; dy += 2) {
+      for (let dx = -r; dx <= r; dx += 2) {
+        if (Math.hypot(dx, dy) > r) continue;
+        const nx2 = cx + dx, ny2 = cy + dy;
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const s = scoreFn(nx2, ny2);
+        if (s > best) { best = s; bestX = nx2; bestY = ny2; }
+      }
+    }
+    return bestX >= 0 ? { x: bestX, y: bestY } : null;
+  };
+
+  const isUnwalkable = (x: number, y: number) => {
+    const g = cells[y][x].geology;
+    return g === GeologyType.Water || g === GeologyType.Ice;
+  };
+
+  const circuits: HuntingCircuit[] = [];
+  const target = 5 + Math.floor(random() * 6); // 5–10
+  const placedCtrs: { x: number; y: number }[] = [];
+  const SEARCH_R = 25;
+
+  for (const ctr of ctrCands) {
+    if (circuits.length >= target) break;
+    if (placedCtrs.some(p => Math.hypot(p.x - ctr.x, p.y - ctr.y) < 20)) continue;
+
+    // Spring: river bank with good fish
+    const spring = findWaypoint(ctr.x, ctr.y, SEARCH_R, (x, y) => {
+      const c = cells[y][x];
+      if (isUnwalkable(x, y) || c.altitude <= SEA_LEVEL) return -1;
+      if (c.riverFlow < 80) return -1;
+      return foodMap.grid[fi(x, y)].fish + (nearRiver[fi(x, y)] <= 2 ? 0.3 : 0);
+    }, 0.2);
+
+    // Summer: high ground, deer-rich
+    const summer = findWaypoint(ctr.x, ctr.y, SEARCH_R, (x, y) => {
+      const c = cells[y][x];
+      if (isUnwalkable(x, y) || c.altitude < 0.38) return -1;
+      return foodMap.grid[fi(x, y)].deer + (c.altitude - 0.38) * 2;
+    }, 0.3);
+
+    // Autumn: oak forest (clay/limestone), boar-rich
+    const autumn = findWaypoint(ctr.x, ctr.y, SEARCH_R, (x, y) => {
+      const c = cells[y][x];
+      if (c.geology !== GeologyType.Clay && c.geology !== GeologyType.Limestone) return -1;
+      if (c.altitude <= SEA_LEVEL || c.altitude >= TREELINE) return -1;
+      return foodMap.grid[fi(x, y)].boar;
+    }, 0.15);
+
+    // Winter: sheltered valley, deer and firewood
+    const winter = findWaypoint(ctr.x, ctr.y, SEARCH_R, (x, y) => {
+      const c = cells[y][x];
+      if (isUnwalkable(x, y) || c.altitude <= SEA_LEVEL || c.altitude > 0.35) return -1;
+      return foodMap.grid[fi(x, y)].deer + (nearRiver[fi(x, y)] <= 4 ? 0.2 : 0);
+    }, 0.15);
+
+    if (!spring || !summer || !autumn || !winter) continue;
+
+    // Waypoints must be reasonably distinct from each other
+    const wps = [spring, summer, autumn, winter];
+    let distinct = true;
+    for (let a = 0; a < wps.length && distinct; a++)
+      for (let b = a + 1; b < wps.length && distinct; b++)
+        if (Math.hypot(wps[a].x - wps[b].x, wps[a].y - wps[b].y) < 5) distinct = false;
+    if (!distinct) continue;
+
+    // At least one waypoint within 10 cells of a settlement (trade contact)
+    const hasContact = wps.some(wp =>
+      settlements.some(s => Math.hypot(s.x - wp.x, s.y - wp.y) <= 10)
+    );
+    if (!hasContact) continue;
+
+    // Route A* around the loop: spring → summer → autumn → winter → spring
+    const allPathCells: [number, number][] = [];
+    const legPairs: [{ x: number; y: number }, { x: number; y: number }][] = [
+      [spring, summer], [summer, autumn], [autumn, winter], [winter, spring],
+    ];
+    for (const [from, to] of legPairs) {
+      const leg = astar.solve(terrain, fordSet, from.x, from.y, to.x, to.y, 5000);
+      if (leg) allPathCells.push(...leg);
+    }
+
+    circuits.push({
+      waypoints: [
+        { x: spring.x, y: spring.y, season: 'spring' },
+        { x: summer.x, y: summer.y, season: 'summer' },
+        { x: autumn.x, y: autumn.y, season: 'autumn' },
+        { x: winter.x, y: winter.y, season: 'winter' },
+      ],
+      groupSize: 8 + Math.floor(random() * 13), // 8–20
+      pathCells: allPathCells,
+    });
+    placedCtrs.push({ x: ctr.x, y: ctr.y });
+  }
+
+  return { circuits };
+}

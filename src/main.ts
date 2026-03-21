@@ -9,6 +9,7 @@ import {
   computePathNetwork, PathNetwork,
   computeSacredSites, SacredData,
   computeSeasonalCamps, SeasonalData,
+  computeHuntingCircuits, HuntingData,
 } from "./habitation";
 import {
   renderTerrainToBuffer,
@@ -29,6 +30,7 @@ let currentSettlements: SettlementData | null = null;
 let currentPathNetwork: PathNetwork | null = null;
 let currentSacred: SacredData | null = null;
 let currentSeasonal: SeasonalData | null = null;
+let currentHunting: HuntingData | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -302,6 +304,17 @@ function logSettlementStats(sd: SettlementData): void {
   );
 }
 
+function logHuntingStats(hd: HuntingData): void {
+  const { circuits } = hd;
+  const sizes = circuits.map(c => c.groupSize);
+  const avgSize = sizes.length ? Math.round(sizes.reduce((a, b) => a + b, 0) / sizes.length) : 0;
+  const totalPathCells = circuits.reduce((s, c) => s + c.pathCells.length, 0);
+  console.log(
+    `[Hunting] ${circuits.length} circuits · group sizes ${sizes.join(', ')}` +
+    ` · avg size ${avgSize} · total routed cells ${totalPathCells}`
+  );
+}
+
 function logSeasonalStats(sd: SeasonalData): void {
   const byType = (t: string) => sd.camps.filter(c => c.type === t).length;
   console.log(
@@ -387,6 +400,8 @@ function generate(seed: string): void {
   logSacredStats(currentSacred);
   currentSeasonal = computeSeasonalCamps(currentTerrain, currentFoodMap, currentSettlements, currentPathNetwork, currentSacred, seed);
   logSeasonalStats(currentSeasonal);
+  currentHunting = computeHuntingCircuits(currentTerrain, currentFoodMap, currentSettlements, seed);
+  logHuntingStats(currentHunting);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map
