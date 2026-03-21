@@ -1,7 +1,7 @@
 import { createSeededNoise } from "./noise";
 import { generateTerrain, TerrainMap, TerrainCell } from "./terrain";
 import { GEOLOGY_INFO } from "./geology";
-import { computeFoodResources, FoodResourceMap } from "./habitation";
+import { computeFoodResources, FoodResourceMap, generateWightTerritories, WightData } from "./habitation";
 import {
   renderTerrainToBuffer,
   bakeVegetationNoise,
@@ -15,6 +15,7 @@ import {
 // --- State ---
 let currentTerrain: TerrainMap | null = null;
 let currentFoodMap: FoodResourceMap | null = null;
+let currentWightData: WightData | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -267,6 +268,15 @@ function logFoodStats(fm: FoodResourceMap): void {
   );
 }
 
+function logWightStats(w: WightData): void {
+  const caveOcc = w.caveWights.filter(t => t.occupied).length;
+  const sfOcc   = w.smallFolk.filter(t => t.occupied).length;
+  console.log(
+    `[Wights] cave-wight sites: ${w.caveWights.length} total, ${caveOcc} occupied` +
+    ` · small-folk sites: ${w.smallFolk.length} total, ${sfOcc} occupied`
+  );
+}
+
 // --- Generate terrain ---
 function generate(seed: string): void {
   const startTime = performance.now();
@@ -277,6 +287,8 @@ function generate(seed: string): void {
   currentBuffer = renderTerrainToBuffer(currentTerrain, showVegetation);
   currentFoodMap = computeFoodResources(currentTerrain, seed);
   logFoodStats(currentFoodMap);
+  currentWightData = generateWightTerritories(currentTerrain, seed);
+  logWightStats(currentWightData);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map

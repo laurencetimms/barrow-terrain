@@ -410,3 +410,165 @@ export function computeFoodResources(
 
   return { width, height, grid, wolfTerritories, bearRanges };
 }
+
+// ---------------------------------------------------------------------------
+// Step 2: Wight Territories
+// ---------------------------------------------------------------------------
+
+export interface CaveWightTerritory {
+  cx: number;
+  cy: number;
+  /** Core radius — almost nobody lives here. */
+  coreRadius: number;
+  /** Peripheral radius — settlement is suppressed but not zero. */
+  peripheralRadius: number;
+  occupied: boolean;
+}
+
+export interface SmallFolkTerritory {
+  cx: number;
+  cy: number;
+  radius: number;
+  occupied: boolean;
+}
+
+export interface WightData {
+  caveWights:  CaveWightTerritory[];
+  smallFolk:   SmallFolkTerritory[];
+}
+
+/**
+ * Generates wight territories from terrain data.
+ *
+ * Cave-wights: limestone at moderate altitude (0.28–0.50) with high local
+ * terrain complexity (roughness suggesting cave-forming landscape).
+ * 10–15 candidate sites; 8–12 are occupied.
+ *
+ * Small-folk: warm wet habitat — low-altitude clay or water-lands with
+ * high moisture (near rivers, in water-lands, near coast).
+ * 5–10 candidate sites; 3–7 are occupied.
+ *
+ * Territories are invisible data only — not rendered, but influence
+ * carrying capacity (Step 3) and sacred site placement (Step 7).
+ */
+export function generateWightTerritories(
+  terrain: TerrainMap,
+  seed: string
+): WightData {
+  const { width, height, cells } = terrain;
+  const rng = createSeededNoise(seed + "\0wight").random;
+
+  // ── Terrain roughness (local altitude standard deviation) ─────────────────
+  // Used to identify cave-forming limestone terrain. Computed over a radius-3
+  // window; stored as a flat Float32Array.
+  const ROUGH_RADIUS = 3;
+  const roughness = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0, sumSq = 0, count = 0;
+      for (let dy = -ROUGH_RADIUS; dy <= ROUGH_RADIUS; dy++) {
+        for (let dx = -ROUGH_RADIUS; dx <= ROUGH_RADIUS; dx++) {
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          const a = cells[ny2][nx2].altitude;
+          sum += a;
+          sumSq += a * a;
+          count++;
+        }
+      }
+      const mean = sum / count;
+      roughness[y * width + x] = Math.sqrt(Math.max(0, sumSq / count - mean * mean));
+    }
+  }
+
+  // ── Proximity maps needed for small-folk ─────────────────────────────────
+  const nearRiver = bfsProximity(width, height, 6,
+    (i) => { const x = i % width, y = (i - x) / width; return cells[y][x].riverFlow > 0; }
+  );
+  const nearCoast = bfsProximity(width, height, 6,
+    (i) => { const x = i % width, y = (i - x) / width; return cells[y][x].isCoast; }
+  );
+
+  // ── Cave-wight candidates ─────────────────────────────────────────────────
+  type Candidate = { x: number; y: number; score: number };
+  const caveRaw: Candidate[] = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      if (cell.geology !== GeologyType.Limestone) continue;
+      if (cell.altitude < 0.28 || cell.altitude > 0.50) continue;
+      const rough = roughness[y * width + x];
+      if (rough < 0.018) continue; // not complex enough
+      const score = rough * 10 + (cell.altitude - 0.28) / 0.22;
+      caveRaw.push({ x, y, score });
+    }
+  }
+  caveRaw.sort((a, b) => b.score - a.score);
+
+  // Apply minimum spacing to get distinct territories (min 12 cells apart)
+  const caveSpaced = minSpacingFilter(caveRaw, 12);
+  // Take 10-15 candidates (but no more than available)
+  const caveCandidateCount = Math.min(caveSpaced.length, 10 + Math.floor(rng() * 6));
+  const caveCandidates = caveSpaced.slice(0, caveCandidateCount);
+
+  // Mark 8-12 as occupied (at least 80% of candidates, but cap at available)
+  const caveOccupiedCount = Math.min(caveCandidates.length, 8 + Math.floor(rng() * 5));
+  // Shuffle candidates lightly with RNG so occupied ones aren't always the top-scorers
+  const caveShuffled = [...caveCandidates].sort(() => rng() - 0.5);
+
+  const caveWights: CaveWightTerritory[] = caveShuffled.map((c, i) => ({
+    cx: c.x,
+    cy: c.y,
+    coreRadius:       3 + Math.floor(rng() * 2),  // 3-4
+    peripheralRadius: 6 + Math.floor(rng() * 3),  // 6-8
+    occupied: i < caveOccupiedCount,
+  }));
+
+  // ── Small-folk candidates ─────────────────────────────────────────────────
+  const sfRaw: Candidate[] = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      // Warm wet habitat: low clay or water-lands
+      const isLowClay = cell.geology === GeologyType.Clay
+        && cell.altitude < 0.30
+        && cell.altitude >= 0.22;
+      const isWaterLands = cell.waterLandsType !== undefined
+        && (cell.waterLandsType === 'raisedIsland' || cell.waterLandsType === 'carrWoodland');
+      if (!isLowClay && !isWaterLands) continue;
+
+      const idx = y * width + x;
+      const rDist = nearRiver[idx];
+      const cDist = nearCoast[idx];
+      // Need moisture: near river, in water-lands, or near coast
+      if (rDist > 3 && cDist > 4 && !isWaterLands) continue;
+
+      let score = 0;
+      if (isWaterLands) score += 0.5;
+      if (rDist <= 1) score += 0.4;
+      else if (rDist <= 3) score += 0.2;
+      if (cDist <= 2) score += 0.2;
+      sfRaw.push({ x, y, score });
+    }
+  }
+  sfRaw.sort((a, b) => b.score - a.score);
+
+  // Spacing 10 cells apart so territories are geographically distinct
+  const sfSpaced = minSpacingFilter(sfRaw, 10);
+  const sfCandidateCount = Math.min(sfSpaced.length, 5 + Math.floor(rng() * 6));
+  const sfCandidates = sfSpaced.slice(0, sfCandidateCount);
+
+  const sfOccupiedCount = Math.min(sfCandidates.length, 3 + Math.floor(rng() * 5));
+  const sfShuffled = [...sfCandidates].sort(() => rng() - 0.5);
+
+  const smallFolk: SmallFolkTerritory[] = sfShuffled.map((c, i) => ({
+    cx: c.x,
+    cy: c.y,
+    radius: 3 + Math.floor(rng() * 3),  // 3-5
+    occupied: i < sfOccupiedCount,
+  }));
+
+  return { caveWights, smallFolk };
+}
