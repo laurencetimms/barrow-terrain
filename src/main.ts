@@ -6,6 +6,7 @@ import {
   generateWightTerritories, WightData,
   computeCarryingCapacity, CarryingCapacity,
   computeSettlements, SettlementData,
+  computePathNetwork, PathNetwork,
 } from "./habitation";
 import {
   renderTerrainToBuffer,
@@ -23,6 +24,7 @@ let currentFoodMap: FoodResourceMap | null = null;
 let currentWightData: WightData | null = null;
 let currentCarrying: CarryingCapacity | null = null;
 let currentSettlements: SettlementData | null = null;
+let currentPathNetwork: PathNetwork | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -296,6 +298,19 @@ function logSettlementStats(sd: SettlementData): void {
   );
 }
 
+function logPathStats(pn: PathNetwork): void {
+  const { paths } = pn;
+  const major  = paths.filter(p => p.traffic > 500).length;
+  const local  = paths.filter(p => p.traffic > 100 && p.traffic <= 500).length;
+  const minor  = paths.filter(p => p.traffic <= 100).length;
+  const maxT   = paths.reduce((m, p) => Math.max(m, p.traffic), 0);
+  const totalCells = paths.reduce((s, p) => s + p.cells.length, 0);
+  console.log(
+    `[Paths] ${paths.length} segments · major ${major}, local ${local}, minor ${minor}` +
+    ` · peak traffic ${maxT} · total path cells ${totalCells}`
+  );
+}
+
 function logCarryingStats(cc: CarryingCapacity): void {
   const { habitability: h } = cc;
   let sum = 0, nonZero = 0, high = 0;
@@ -336,6 +351,8 @@ function generate(seed: string): void {
   logCarryingStats(currentCarrying);
   currentSettlements = computeSettlements(currentTerrain, currentFoodMap, currentCarrying, currentWightData);
   logSettlementStats(currentSettlements);
+  currentPathNetwork = computePathNetwork(currentTerrain, currentSettlements);
+  logPathStats(currentPathNetwork);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map

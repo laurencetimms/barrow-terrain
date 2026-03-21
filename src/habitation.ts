@@ -1149,3 +1149,402 @@ export function computeSettlements(
 
   return { settlements, fords, abandoned };
 }
+
+// ---------------------------------------------------------------------------
+// Step 6: Path Network
+// ---------------------------------------------------------------------------
+
+export interface PathSegment {
+  /** Sequence of [x, y] terrain-grid coordinates from source to destination. */
+  cells:   [number, number][];
+  /** Combined population of all settlements that route through this path. */
+  traffic: number;
+  fromIdx: number;  // index into settlements array
+  toIdx:   number;
+}
+
+export interface PathNetwork {
+  paths: PathSegment[];
+}
+
+// ── Binary min-heap ──────────────────────────────────────────────────────────
+
+class MinHeap {
+  private h: Float64Array;
+  private v: Int32Array;
+  private n = 0;
+
+  constructor(capacity = 32768) {
+    this.h = new Float64Array(capacity);
+    this.v = new Int32Array(capacity);
+  }
+  get size() { return this.n; }
+  clear() { this.n = 0; }
+
+  push(priority: number, value: number) {
+    let i = this.n++;
+    this.h[i] = priority;
+    this.v[i] = value;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (this.h[p] <= this.h[i]) break;
+      this._swap(i, p);
+      i = p;
+    }
+  }
+
+  pop(): { priority: number; value: number } {
+    const top = { priority: this.h[0], value: this.v[0] };
+    this.n--;
+    if (this.n > 0) {
+      this.h[0] = this.h[this.n];
+      this.v[0] = this.v[this.n];
+      let i = 0;
+      while (true) {
+        const l = 2*i+1, r = 2*i+2;
+        let s = i;
+        if (l < this.n && this.h[l] < this.h[s]) s = l;
+        if (r < this.n && this.h[r] < this.h[s]) s = r;
+        if (s === i) break;
+        this._swap(i, s);
+        i = s;
+      }
+    }
+    return top;
+  }
+
+  private _swap(a: number, b: number) {
+    const th = this.h[a]; this.h[a] = this.h[b]; this.h[b] = th;
+    const tv = this.v[a]; this.v[a] = this.v[b]; this.v[b] = tv;
+  }
+}
+
+// ── A* solver (arrays allocated once, reset via touched list) ────────────────
+
+class AStarSolver {
+  private readonly gCost:   Float32Array;
+  private readonly prev:    Int32Array;
+  private readonly closed:  Uint8Array;
+  private readonly w:       number;
+  private readonly h:       number;
+  private readonly heap:    MinHeap;
+
+  constructor(width: number, height: number) {
+    this.w      = width;
+    this.h      = height;
+    this.gCost  = new Float32Array(width * height).fill(Infinity);
+    this.prev   = new Int32Array(width * height).fill(-1);
+    this.closed = new Uint8Array(width * height);
+    this.heap   = new MinHeap(32768);
+  }
+
+  /**
+   * Finds the lowest-cost path from (x0,y0) to (x1,y1) using the movement
+   * cost model from the spec. Returns null if no path found within maxNodes.
+   */
+  solve(
+    terrain:  TerrainMap,
+    fordSet:  Set<number>,
+    x0: number, y0: number,
+    x1: number, y1: number,
+    maxNodes = 8000
+  ): [number, number][] | null {
+    const { w, h } = this;
+    const { cells } = terrain;
+    const gTouched: number[] = [];
+    const cTouched: number[] = [];
+
+    const start = y0 * w + x0;
+    const goal  = y1 * w + x1;
+    this.gCost[start] = 0;
+    gTouched.push(start);
+    this.heap.clear();
+    this.heap.push(Math.hypot(x0 - x1, y0 - y1), start);
+
+    // 8-directional movement; index 0,2,5,7 are diagonals
+    const DX = [-1, 0, 1, -1, 1, -1, 0, 1];
+    const DY = [-1,-1,-1,  0, 0,  1, 1, 1];
+    const BASE_COST = [Math.SQRT2,1,Math.SQRT2,1,1,Math.SQRT2,1,Math.SQRT2];
+
+    let expanded = 0;
+    let found    = false;
+
+    outer: while (this.heap.size > 0 && expanded < maxNodes) {
+      const { priority: f, value: idx } = this.heap.pop();
+      if (this.closed[idx]) continue;
+      this.closed[idx] = 1;
+      cTouched.push(idx);
+      expanded++;
+
+      if (idx === goal) { found = true; break outer; }
+
+      const cx = idx % w;
+      const cy = (idx - cx) / w;
+      const gCurr = this.gCost[idx];
+      const fromAlt = cells[cy][cx].altitude;
+
+      for (let d = 0; d < 8; d++) {
+        const nx2 = cx + DX[d];
+        const ny2 = cy + DY[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+
+        const nIdx  = ny2 * w + nx2;
+        if (this.closed[nIdx]) continue;
+
+        const toCell = cells[ny2][nx2];
+        const toGeo  = toCell.geology;
+
+        // Movement cost
+        let cost = BASE_COST[d];
+        if (toGeo === GeologyType.Ice) {
+          cost = 999;
+        } else if (toGeo === GeologyType.Water) {
+          cost = fordSet.has(nIdx) ? 2.0 : 50.0;
+        } else {
+          cost *= 1 + Math.abs(toCell.altitude - fromAlt) * 15;
+          if (toGeo === GeologyType.Clay) cost *= 1.8;
+          else if (toGeo === GeologyType.Limestone || toGeo === GeologyType.Slate) cost *= 1.4;
+        }
+
+        const newG = gCurr + cost;
+        if (newG >= this.gCost[nIdx]) continue;
+        if (this.gCost[nIdx] === Infinity) gTouched.push(nIdx);
+        this.gCost[nIdx] = newG;
+        this.prev[nIdx]  = idx;
+        this.heap.push(newG + Math.hypot(nx2 - x1, ny2 - y1), nIdx);
+      }
+    }
+
+    // Reconstruct path
+    let result: [number, number][] | null = null;
+    if (found || this.gCost[goal] < Infinity) {
+      const path: [number, number][] = [];
+      let cur = goal;
+      while (cur !== -1) {
+        path.push([cur % w, Math.floor(cur / w)]);
+        cur = this.prev[cur];
+      }
+      result = path.reverse();
+    }
+
+    // Reset touched cells
+    for (const i of gTouched) { this.gCost[i] = Infinity; this.prev[i] = -1; }
+    for (const i of cTouched)   this.closed[i] = 0;
+
+    return result;
+  }
+}
+
+// ── Main path network function ───────────────────────────────────────────────
+
+/**
+ * Builds the path network connecting settlements across four phases:
+ *   Phase 1 — local A* connections to nearest 3 neighbours
+ *   Phase 2 — river bankside connections (settlements on same river, consecutive by altitude)
+ *   Phase 3 — ridgeline connections (settlements near the same E-W ridge)
+ *   Phase 4 — ford convergence (opposite-bank settlements routed through fords)
+ *
+ * Traffic is computed by BFS propagation: each settlement's population
+ * is added to every path reachable from it through the network.
+ */
+export function computePathNetwork(
+  terrain:        TerrainMap,
+  settlementData: SettlementData,
+): PathNetwork {
+  const { width, height, cells } = terrain;
+  const { settlements, fords }   = settlementData;
+  const land = settlements.map((s, i) => ({ s, i })).filter(({ s }) => !s.isWaterLands);
+
+  const fordSet = new Set(fords.map(f => f.y * width + f.x));
+  const astar   = new AStarSolver(width, height);
+
+  const paths: PathSegment[] = [];
+  /** Tracks pairs already connected so we don't duplicate paths. */
+  const connected = new Set<string>();
+  const pairKey   = (a: number, b: number) => a < b ? `${a}-${b}` : `${b}-${a}`;
+
+  function addPath(i: number, j: number, maxNodes = 8000) {
+    const key = pairKey(i, j);
+    if (connected.has(key)) return;
+    connected.add(key);
+    const si = settlements[i], sj = settlements[j];
+    const c = astar.solve(terrain, fordSet, si.x, si.y, sj.x, sj.y, maxNodes);
+    if (c) paths.push({ cells: c, traffic: 0, fromIdx: i, toIdx: j });
+  }
+
+  // ── Phase 1: local connections (nearest 3 neighbours) ──────────────────────
+  const NEAR_K  = 3;
+  const NEAR_MAX = 55; // cells; don't connect very distant settlements in Phase 1
+
+  for (const { s, i } of land) {
+    const nearest = land
+      .map(({ s: t, i: j }) => ({ j, d: Math.hypot(t.x - s.x, t.y - s.y) }))
+      .filter(({ j, d }) => j !== i && d <= NEAR_MAX)
+      .sort((a, b) => a.d - b.d)
+      .slice(0, NEAR_K);
+    for (const { j } of nearest) addPath(i, j);
+  }
+
+  // ── Phase 2: river bankside paths ──────────────────────────────────────────
+  // Flood-fill connected river components, then connect settlements on the
+  // same river sorted upstream→downstream (by altitude of nearest river cell).
+
+  const riverComp = new Int32Array(width * height).fill(-1);
+  const dirs4: [number,number][] = [[0,-1],[0,1],[-1,0],[1,0]];
+  let compId = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (cells[y][x].riverFlow <= 0 || riverComp[y * width + x] >= 0) continue;
+      const q: number[] = [y * width + x];
+      riverComp[y * width + x] = compId;
+      for (let qi = 0; qi < q.length; qi++) {
+        const cur = q[qi];
+        const cx = cur % width, cy = (cur - cx) / width;
+        for (const [dx, dy] of dirs4) {
+          const nx2 = cx + dx, ny2 = cy + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          const ni = ny2 * width + nx2;
+          if (cells[ny2][nx2].riverFlow <= 0 || riverComp[ni] >= 0) continue;
+          riverComp[ni] = compId;
+          q.push(ni);
+        }
+      }
+      compId++;
+    }
+  }
+
+  // For each land settlement, find its nearest river component (within 3 cells)
+  const settlRiverComp: (number | null)[] = settlements.map((s) => {
+    for (let r = 0; r <= 3; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+          const nx2 = s.x + dx, ny2 = s.y + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          const c = riverComp[ny2 * width + nx2];
+          if (c >= 0) return c;
+        }
+      }
+    }
+    return null;
+  });
+
+  const riverGroups = new Map<number, number[]>();
+  for (const { i } of land) {
+    const c = settlRiverComp[i];
+    if (c === null) continue;
+    if (!riverGroups.has(c)) riverGroups.set(c, []);
+    riverGroups.get(c)!.push(i);
+  }
+  for (const group of riverGroups.values()) {
+    if (group.length < 2) continue;
+    // Sort upstream (higher altitude) first
+    group.sort((a, b) =>
+      cells[settlements[b].y][settlements[b].x].altitude -
+      cells[settlements[a].y][settlements[a].x].altitude
+    );
+    // Connect consecutive settlements along the river
+    for (let k = 0; k + 1 < group.length; k++) {
+      const dist = Math.hypot(
+        settlements[group[k]].x - settlements[group[k+1]].x,
+        settlements[group[k]].y - settlements[group[k+1]].y
+      );
+      if (dist > 80) continue; // too far apart to be on the same useful reach
+      addPath(group[k], group[k+1], 12000);
+    }
+  }
+
+  // ── Phase 3: ridgeline paths ────────────────────────────────────────────────
+  // Ridgeline cells: local E-W altitude maxima. Settlements near a connected
+  // ridgeline corridor are connected consecutively along the ridge (N→S).
+
+  const ridgeMask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const a = cells[y][x].altitude;
+      if (a > cells[y][x-1].altitude && a > cells[y][x+1].altitude && a > 0.28) {
+        ridgeMask[y * width + x] = 1;
+      }
+    }
+  }
+
+  const nearRidge = bfsProximity(width, height, 5, i => ridgeMask[i] === 1);
+
+  // Sort ridge-adjacent settlements N→S and connect consecutive within range
+  const ridgeLand = land
+    .filter(({ s, i }) => !s.isWaterLands && nearRidge[s.y * width + s.x] <= 5)
+    .sort((a, b) => b.s.y - a.s.y); // ascending y = N→S (y=0 is south in ny coords, but terrain y=0 is top/north)
+
+  for (let k = 0; k + 1 < ridgeLand.length; k++) {
+    const { s, i } = ridgeLand[k];
+    const { s: t, i: j } = ridgeLand[k+1];
+    const dist = Math.hypot(s.x - t.x, s.y - t.y);
+    if (dist > 60) continue;
+    addPath(i, j, 10000);
+  }
+
+  // ── Phase 4: ford convergence ───────────────────────────────────────────────
+  // Settlements within 10 cells of a ford that aren't already connected get
+  // a path routed through the ford (A* cost-2 ford cell beats cost-50 water).
+
+  for (const ford of fords) {
+    const nearby = land
+      .filter(({ s }) => Math.hypot(s.x - ford.x, s.y - ford.y) <= 10)
+      .map(({ i }) => i);
+    for (let a = 0; a < nearby.length; a++) {
+      for (let b = a + 1; b < nearby.length; b++) {
+        // Only bother if they're on different sides of the river crossing
+        const si = settlements[nearby[a]], sj = settlements[nearby[b]];
+        const sameXSide = (si.x - ford.x) * (sj.x - ford.x) >= 0;
+        const sameYSide = (si.y - ford.y) * (sj.y - ford.y) >= 0;
+        if (sameXSide && sameYSide) continue; // same side — skip
+        addPath(nearby[a], nearby[b], 12000);
+      }
+    }
+  }
+
+  // ── Traffic scoring ─────────────────────────────────────────────────────────
+  // Build adjacency list on the settlement graph, then BFS from each settlement,
+  // adding its population to every path reachable through the network.
+
+  const adjList: { toIdx: number; pathIdx: number }[][] = Array.from(
+    { length: settlements.length }, () => []
+  );
+  for (let pi = 0; pi < paths.length; pi++) {
+    const { fromIdx, toIdx } = paths[pi];
+    adjList[fromIdx].push({ toIdx, pathIdx: pi });
+    adjList[toIdx].push({ toIdx: fromIdx, pathIdx: pi });
+  }
+
+  const trafficArr = new Float32Array(paths.length);
+  const visitBuf   = new Uint8Array(settlements.length);
+  const visitQ:    number[] = [];
+
+  for (let si = 0; si < settlements.length; si++) {
+    const pop = settlements[si].population;
+    if (pop <= 0) continue;
+
+    // BFS through path graph from si
+    visitBuf[si] = 1;
+    visitQ.length = 0;
+    visitQ.push(si);
+
+    for (let qi = 0; qi < visitQ.length; qi++) {
+      const cur = visitQ[qi];
+      for (const { toIdx, pathIdx } of adjList[cur]) {
+        trafficArr[pathIdx] += pop;
+        if (!visitBuf[toIdx]) {
+          visitBuf[toIdx] = 1;
+          visitQ.push(toIdx);
+        }
+      }
+    }
+
+    // Reset visit buffer
+    for (const idx of visitQ) visitBuf[idx] = 0;
+  }
+
+  for (let pi = 0; pi < paths.length; pi++) paths[pi].traffic = trafficArr[pi];
+
+  return { paths };
+}
