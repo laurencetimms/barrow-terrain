@@ -1,6 +1,7 @@
 import { createSeededNoise } from "./noise";
 import { generateTerrain, TerrainMap, TerrainCell } from "./terrain";
 import { GEOLOGY_INFO } from "./geology";
+import { computeFoodResources, FoodResourceMap } from "./habitation";
 import {
   renderTerrainToBuffer,
   bakeVegetationNoise,
@@ -13,6 +14,7 @@ import {
 
 // --- State ---
 let currentTerrain: TerrainMap | null = null;
+let currentFoodMap: FoodResourceMap | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -245,6 +247,26 @@ function getHoveredCell(clientX: number, clientY: number): TerrainCell | null {
   return currentTerrain.cells[pos.y][pos.x];
 }
 
+// --- Food resource diagnostics ---
+function logFoodStats(fm: FoodResourceMap): void {
+  const n = fm.grid.length;
+  let sumDeer = 0, sumFish = 0, sumWildfowl = 0, sumWolf = 0, sumBear = 0;
+  for (const r of fm.grid) {
+    sumDeer     += r.deer;
+    sumFish     += r.fish;
+    sumWildfowl += r.wildfowl;
+    sumWolf     += r.wolfRisk;
+    sumBear     += r.bearRisk;
+  }
+  console.log(
+    `[Food] deer avg ${(sumDeer/n).toFixed(3)}` +
+    ` · fish avg ${(sumFish/n).toFixed(3)}` +
+    ` · wildfowl avg ${(sumWildfowl/n).toFixed(3)}` +
+    ` · wolf avg risk ${(sumWolf/n).toFixed(3)} (${fm.wolfTerritories.length} packs)` +
+    ` · bear avg risk ${(sumBear/n).toFixed(3)} (${fm.bearRanges.length} ranges)`
+  );
+}
+
 // --- Generate terrain ---
 function generate(seed: string): void {
   const startTime = performance.now();
@@ -253,6 +275,8 @@ function generate(seed: string): void {
   currentTerrain = generateTerrain(noise, MAP_WIDTH, MAP_HEIGHT, seed);
   bakeVegetationNoise(currentTerrain);
   currentBuffer = renderTerrainToBuffer(currentTerrain, showVegetation);
+  currentFoodMap = computeFoodResources(currentTerrain, seed);
+  logFoodStats(currentFoodMap);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map
