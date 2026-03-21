@@ -33,6 +33,8 @@ let currentSacred: SacredData | null = null;
 let currentSeasonal: SeasonalData | null = null;
 let currentHunting: HuntingData | null = null;
 let currentValidation: ValidationReport | null = null;
+/** Flat-index → max traffic. Built after path network; used for O(1) hover lookups. */
+let pathLookup: Map<number, number> | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -159,6 +161,235 @@ function computePatchBounds(terrain: TerrainMap, vp: Viewport) {
   return { x0, y0, x1, y1, viewSx: sx, viewSy: sy, viewW, viewH };
 }
 
+// --- Habitation overlay ---
+function renderHabitationOverlay(): void {
+  if (!currentTerrain || !currentSettlements || !currentPathNetwork || !currentSacred || !currentSeasonal) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const cw = canvas.width, ch = canvas.height;
+  const zoom = viewport.zoom;
+  const baseScale = Math.min(cw / currentTerrain.width, ch / currentTerrain.height);
+  const scale = baseScale * zoom;
+  const viewW = cw / scale, viewH = ch / scale;
+  const sx = Math.max(0, Math.min(currentTerrain.width  - viewW, viewport.cx - viewW / 2));
+  const sy = Math.max(0, Math.min(currentTerrain.height - viewH, viewport.cy - viewH / 2));
+
+  // Terrain grid → canvas pixels (centred on cell)
+  const tc = (tx: number, ty: number): [number, number] =>
+    [(tx + 0.5 - sx) * scale, (ty + 0.5 - sy) * scale];
+  const vis = (px: number, py: number) =>
+    px > -12 && px < cw + 12 && py > -12 && py < ch + 12;
+
+  ctx.save();
+
+  // ── Paths (3 passes: major → local → minor) ──────────────────────────────
+  const pathStyles: [number, number, number, string, number][] = [
+    // [minTraffic, maxTraffic, minZoom, color, lineWidth]
+    [501, Infinity, 1.5, '#7a6a50', 1.5],
+    [101, 500,      3.0, '#9a8a70', 1.0],
+    [0,   100,      5.0, '#b0a090', 0.5],
+  ];
+  ctx.globalAlpha = 0.85;
+  for (const [minT, maxT, minZ, color, lw] of pathStyles) {
+    if (zoom < minZ) continue;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    for (const path of currentPathNetwork.paths) {
+      const t = path.traffic;
+      if (t < minT || t > maxT || path.cells.length < 2) continue;
+      ctx.beginPath();
+      const [x0, y0] = tc(path.cells[0][0], path.cells[0][1]);
+      ctx.moveTo(x0, y0);
+      for (let i = 1; i < path.cells.length; i++) {
+        const [xi, yi] = tc(path.cells[i][0], path.cells[i][1]);
+        ctx.lineTo(xi, yi);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // ── Fords ────────────────────────────────────────────────────────────────
+  if (zoom >= 3) {
+    ctx.fillStyle = '#7090a0';
+    ctx.strokeStyle = '#4a7090';
+    ctx.lineWidth = 0.5;
+    for (const f of currentSettlements.fords) {
+      const [px, py] = tc(f.x, f.y);
+      if (!vis(px, py)) continue;
+      ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+    }
+  }
+
+  // ── Abandoned settlements ─────────────────────────────────────────────────
+  if (zoom >= 3) {
+    ctx.strokeStyle = '#8a7a6a';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    for (const s of currentSettlements.abandoned) {
+      const [px, py] = tc(s.x, s.y);
+      if (!vis(px, py)) continue;
+      const r = s.historicalSize === 'homestead' ? 2 : s.historicalSize === 'hamlet' ? 3
+              : s.historicalSize === 'village'   ? 4 : 5;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // ── Seasonal camps ────────────────────────────────────────────────────────
+  if (zoom >= 3) {
+    ctx.fillStyle = '#c0a870';
+    for (const c of currentSeasonal.camps) {
+      const [px, py] = tc(c.x, c.y);
+      if (!vis(px, py)) continue;
+      ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    if (currentHunting) {
+      ctx.fillStyle = '#b09060';
+      for (const circuit of currentHunting.circuits)
+        for (const wp of circuit.waypoints) {
+          const [px, py] = tc(wp.x, wp.y);
+          if (!vis(px, py)) continue;
+          ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2); ctx.fill();
+        }
+    }
+  }
+
+  // ── Small sacred features ─────────────────────────────────────────────────
+  ctx.fillStyle = 'rgba(200,176,112,0.65)';
+  for (const s of currentSacred.small) {
+    if (zoom < s.minZoom) continue;
+    const [px, py] = tc(s.x, s.y);
+    if (!vis(px, py)) continue;
+    ctx.beginPath(); ctx.arc(px, py, zoom >= 8 ? 2 : 1.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // ── Significant sacred sites ──────────────────────────────────────────────
+  if (zoom >= 2) {
+    ctx.fillStyle = '#c8b070';
+    for (const s of currentSacred.significant) {
+      const [px, py] = tc(s.x, s.y);
+      if (!vis(px, py)) continue;
+      ctx.beginPath(); ctx.arc(px, py, zoom >= 4 ? 3 : 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // ── Major sacred sites ────────────────────────────────────────────────────
+  for (const s of currentSacred.major) {
+    const [px, py] = tc(s.x, s.y);
+    if (!vis(px, py)) continue;
+    const r = zoom >= 3 ? 5 : 4;
+    ctx.fillStyle = '#c8b070';
+    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#c8b070';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(px, py, r + 3, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // ── Settlements ───────────────────────────────────────────────────────────
+  for (const s of currentSettlements.settlements) {
+    if (s.size === 'homestead' && zoom < 2) continue;
+    const [px, py] = tc(s.x, s.y);
+    if (!vis(px, py)) continue;
+    const r = s.isWalledTown ? 6 : s.size === 'town' ? 5 : s.size === 'village' ? 4
+            : s.size === 'hamlet' ? 3 : 2;
+    ctx.fillStyle = '#b08850';
+    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+    if (s.isWalledTown) {
+      ctx.strokeStyle = '#d0b870';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, py, r + 2.5, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+// --- Habitation hover info ---
+function getHabitationHover(tx: number, ty: number): string {
+  const parts: string[] = [];
+
+  if (currentSettlements) {
+    let nearest = null as typeof currentSettlements.settlements[0] | null;
+    let nd = Infinity;
+    for (const s of currentSettlements.settlements) {
+      const d = Math.hypot(s.x - tx, s.y - ty);
+      if (d < 2.5 && d < nd) { nd = d; nearest = s; }
+    }
+    if (nearest) {
+      const lbl = nearest.isWalledTown ? 'Walled town'
+        : nearest.size === 'town' ? 'Town' : nearest.size === 'village' ? 'Village'
+        : nearest.size === 'hamlet' ? 'Hamlet' : 'Homestead';
+      parts.push(`${lbl} · pop ~${nearest.population}`);
+    }
+    let nearestAb = null as typeof currentSettlements.abandoned[0] | null;
+    let nda = Infinity;
+    for (const s of currentSettlements.abandoned) {
+      const d = Math.hypot(s.x - tx, s.y - ty);
+      if (d < 2.5 && d < nda) { nda = d; nearestAb = s; }
+    }
+    if (nearestAb) {
+      const why = nearestAb.reason === 'waterRose' ? 'flooded'
+        : nearestAb.reason === 'iceAdvanced' ? 'iced over' : 'marginal';
+      parts.push(`Abandoned ${nearestAb.historicalSize} (${why})`);
+    }
+    for (const f of currentSettlements.fords)
+      if (Math.hypot(f.x - tx, f.y - ty) < 1.5) { parts.push('Ford'); break; }
+  }
+
+  if (currentSacred) {
+    for (const s of currentSacred.major)
+      if (Math.hypot(s.x - tx, s.y - ty) < 3) {
+        parts.push(s.type === 'greatComplex' ? 'Great ceremonial complex'
+          : s.type === 'henge' ? 'Henge' : 'Stone circle');
+        break;
+      }
+    for (const s of currentSacred.significant)
+      if (Math.hypot(s.x - tx, s.y - ty) < 2) {
+        parts.push(s.type === 'barrow' ? 'Barrow' : s.type === 'standingStone' ? 'Standing stone'
+          : s.type === 'smallStoneCircle' ? 'Small stone circle' : 'Cairn');
+        break;
+      }
+    if (viewport.zoom >= 5) {
+      const SMALL_LABELS: Record<string, string> = {
+        sacredSpring: 'Sacred spring', offeringPool: 'Offering pool',
+        caveEntrance: 'Cave entrance', sacredTree: 'Sacred tree',
+        carvedRockFace: 'Carved rock face', markedStone: 'Marked stone',
+      };
+      for (const s of currentSacred.small)
+        if (Math.hypot(s.x - tx, s.y - ty) < 1.5) {
+          parts.push(SMALL_LABELS[s.type] ?? s.type); break;
+        }
+    }
+  }
+
+  if (pathLookup) {
+    let bestT = 0;
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++)
+        bestT = Math.max(bestT, pathLookup.get((ty + dy) * MAP_WIDTH + (tx + dx)) ?? 0);
+    if (bestT > 0)
+      parts.push(bestT > 500 ? `Trade route (traffic ${Math.round(bestT)})`
+        : bestT > 100 ? `Local path (traffic ${Math.round(bestT)})` : 'Track');
+  }
+
+  if (currentSeasonal && viewport.zoom >= 3) {
+    const CAMP_LABELS: Record<string, string> = {
+      grazingCamp: 'Upland grazing camp', fishingCamp: 'Fishing camp',
+      gatheringCamp: 'Gathering camp', flintMiningCamp: 'Flint-mining camp',
+      tradingSite: 'Trading site',
+    };
+    for (const c of currentSeasonal.camps)
+      if (Math.hypot(c.x - tx, c.y - ty) < 1.5) {
+        parts.push(CAMP_LABELS[c.type] ?? c.type); break;
+      }
+  }
+
+  return parts.length > 0 ? ' · ' + parts.join(' · ') : '';
+}
+
 // --- Render current state ---
 function render(): void {
   if (!currentTerrain || !currentBuffer) return;
@@ -169,6 +400,7 @@ function render(): void {
     highResCache = null;
     pendingBounds = null;
     renderViewport(canvas, currentBuffer, currentTerrain, viewport);
+    renderHabitationOverlay();
     updateZoomDisplay();
     return;
   }
@@ -188,6 +420,7 @@ function render(): void {
     // Progressive fallback: show the coarse buffer immediately so the map is
     // never blank while the worker computes the fine patch.
     renderViewport(canvas, currentBuffer, currentTerrain, viewport);
+    renderHabitationOverlay();
     updateZoomDisplay();
 
     // Only send a new request if the viewport has moved outside the patch the
@@ -215,6 +448,7 @@ function render(): void {
   }
 
   renderHighResViewport(canvas, highResCache!, viewport, currentTerrain);
+  renderHabitationOverlay();
   updateZoomDisplay();
 }
 
@@ -404,6 +638,12 @@ function generate(seed: string): void {
   logSettlementStats(currentSettlements);
   currentPathNetwork = computePathNetwork(currentTerrain, currentSettlements);
   logPathStats(currentPathNetwork);
+  pathLookup = new Map();
+  for (const p of currentPathNetwork.paths)
+    for (const [px, py] of p.cells) {
+      const i = py * MAP_WIDTH + px;
+      if ((pathLookup.get(i) ?? 0) < p.traffic) pathLookup.set(i, p.traffic);
+    }
   currentSacred = computeSacredSites(currentTerrain, currentFoodMap, currentSettlements, currentPathNetwork, currentWightData, seed);
   logSacredStats(currentSacred);
   currentSeasonal = computeSeasonalCamps(currentTerrain, currentFoodMap, currentSettlements, currentPathNetwork, currentSacred, seed);
@@ -585,15 +825,16 @@ canvas.addEventListener("touchend", () => {
 canvas.addEventListener("mousemove", (e) => {
   if (isDragging || !currentTerrain) return;
 
-  const cell = getHoveredCell(e.clientX, e.clientY);
-  if (cell) {
+  const pos = canvasToTerrain(canvas, currentTerrain, viewport, e.clientX, e.clientY);
+  const cell = pos ? currentTerrain.cells[pos.y][pos.x] : null;
+  if (cell && pos) {
     const info = GEOLOGY_INFO[cell.geology];
     const altMetres = Math.round(cell.altitude * 1200);
     const river = cell.riverFlow > 0 ? " · River" : "";
     const coast = cell.isCoast ? " · Coast" : "";
-
+    const hab = getHabitationHover(pos.x, pos.y);
     cursorInfo.textContent =
-      `${info.label} · ${altMetres}m${river}${coast} — ${info.description}`;
+      `${info.label} · ${altMetres}m${river}${coast}${hab} — ${info.description}`;
   }
 });
 
