@@ -8,6 +8,7 @@ import {
   computeSettlements, SettlementData,
   computePathNetwork, PathNetwork,
   computeSacredSites, SacredData,
+  computeSeasonalCamps, SeasonalData,
 } from "./habitation";
 import {
   renderTerrainToBuffer,
@@ -27,6 +28,7 @@ let currentCarrying: CarryingCapacity | null = null;
 let currentSettlements: SettlementData | null = null;
 let currentPathNetwork: PathNetwork | null = null;
 let currentSacred: SacredData | null = null;
+let currentSeasonal: SeasonalData | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -300,6 +302,18 @@ function logSettlementStats(sd: SettlementData): void {
   );
 }
 
+function logSeasonalStats(sd: SeasonalData): void {
+  const byType = (t: string) => sd.camps.filter(c => c.type === t).length;
+  console.log(
+    `[Seasonal] ${sd.camps.length} camps total` +
+    ` · grazing ${byType('grazingCamp')}` +
+    ` · fishing ${byType('fishingCamp')}` +
+    ` · gathering ${byType('gatheringCamp')}` +
+    ` · flint-mining ${byType('flintMiningCamp')}` +
+    ` · trading ${byType('tradingSite')}`
+  );
+}
+
 function logSacredStats(sd: SacredData): void {
   const byType = (arr: { type: string }[], t: string) => arr.filter(s => s.type === t).length;
   const maj = sd.major.map(s => s.type).join(', ') || 'none';
@@ -371,6 +385,8 @@ function generate(seed: string): void {
   logPathStats(currentPathNetwork);
   currentSacred = computeSacredSites(currentTerrain, currentFoodMap, currentSettlements, currentPathNetwork, currentWightData, seed);
   logSacredStats(currentSacred);
+  currentSeasonal = computeSeasonalCamps(currentTerrain, currentFoodMap, currentSettlements, currentPathNetwork, currentSacred, seed);
+  logSeasonalStats(currentSeasonal);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map

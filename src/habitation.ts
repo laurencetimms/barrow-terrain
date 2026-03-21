@@ -1909,3 +1909,225 @@ export function computeSacredSites(
 
   return { major, significant, small };
 }
+
+// ---------------------------------------------------------------------------
+// Step 8: Seasonal Camps
+// ---------------------------------------------------------------------------
+
+export type SeasonalCampType =
+  | 'grazingCamp' | 'fishingCamp' | 'gatheringCamp'
+  | 'flintMiningCamp' | 'tradingSite';
+
+export interface SeasonalCamp {
+  x: number;
+  y: number;
+  type: SeasonalCampType;
+  /** For grazing camps: index into SettlementData.settlements. */
+  parentSettlementIdx?: number;
+}
+
+export interface SeasonalData {
+  camps: SeasonalCamp[];
+}
+
+export function computeSeasonalCamps(
+  terrain:        TerrainMap,
+  foodMap:        FoodResourceMap,
+  settlementData: SettlementData,
+  pathNetwork:    PathNetwork,
+  sacredData:     SacredData,
+  seed:           string,
+): SeasonalData {
+  const { width: w, height: h, cells } = terrain;
+  const { nearRiver, nearCoast } = foodMap;
+  const { settlements } = settlementData;
+  const { paths } = pathNetwork;
+  const { random } = createSeededNoise(seed + '\0seasonal');
+
+  const SEA_LEVEL = 0.22;
+  const TREELINE  = 0.45;
+  const DX4 = [-1, 1, 0, 0];
+  const DY4 = [ 0, 0,-1, 1];
+  const fi = (x: number, y: number) => y * w + x;
+  const camps: SeasonalCamp[] = [];
+
+  const spaceOk = (placed: { x: number; y: number }[], x: number, y: number, d: number) =>
+    placed.every(p => Math.hypot(p.x - x, p.y - y) >= d);
+
+  // ── BFS: distance to nearest settlement ───────────────────────────────────
+  const settDist = new Int16Array(w * h).fill(32767);
+  {
+    const q: number[] = [];
+    for (const s of settlements) {
+      const i = fi(s.x, s.y);
+      if (settDist[i] === 32767) { settDist[i] = 0; q.push(i); }
+    }
+    for (let qi = 0; qi < q.length; qi++) {
+      const ci = q[qi], nd = settDist[ci] + 1;
+      if (nd > 15) continue;
+      const cx = ci % w, cy = (ci / w) | 0;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = cx + DX4[d], ny2 = cy + DY4[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const ni = fi(nx2, ny2);
+        if (settDist[ni] > nd) { settDist[ni] = nd; q.push(ni); }
+      }
+    }
+  }
+
+  // ── BFS: distance to nearest path cell ────────────────────────────────────
+  const pathDist = new Int16Array(w * h).fill(32767);
+  {
+    const q: number[] = [];
+    for (const p of paths) {
+      for (const [px, py] of p.cells) {
+        const pi = fi(px, py);
+        if (pathDist[pi] === 32767) { pathDist[pi] = 0; q.push(pi); }
+      }
+    }
+    for (let qi = 0; qi < q.length; qi++) {
+      const ci = q[qi], nd = pathDist[ci] + 1;
+      if (nd > 8) continue;
+      const cx = ci % w, cy = (ci / w) | 0;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = cx + DX4[d], ny2 = cy + DY4[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const ni = fi(nx2, ny2);
+        if (pathDist[ni] > nd) { pathDist[ni] = nd; q.push(ni); }
+      }
+    }
+  }
+
+  // ── 1. UPLAND GRAZING CAMPS ───────────────────────────────────────────────
+  // One per settlement that sits below the treeline and has upland within 8 cells.
+  const grazingPlaced: { x: number; y: number }[] = [];
+  for (let si = 0; si < settlements.length; si++) {
+    const s = settlements[si];
+    if (s.isWaterLands) continue;
+    if (cells[s.y][s.x].altitude >= TREELINE) continue; // already upland
+    let bestX = -1, bestY = -1, bestScore = -Infinity;
+    for (let dy = -8; dy <= 8; dy++) {
+      for (let dx = -8; dx <= 8; dx++) {
+        if (Math.hypot(dx, dy) > 8) continue;
+        const nx2 = s.x + dx, ny2 = s.y + dy;
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const c = cells[ny2][nx2];
+        if (c.geology === GeologyType.Water || c.geology === GeologyType.Ice) continue;
+        if (c.altitude < TREELINE) continue;
+        const score = c.altitude + (nearRiver[fi(nx2, ny2)] <= 3 ? 0.2 : 0);
+        if (score > bestScore) { bestScore = score; bestX = nx2; bestY = ny2; }
+      }
+    }
+    if (bestX >= 0 && spaceOk(grazingPlaced, bestX, bestY, 3)) {
+      camps.push({ x: bestX, y: bestY, type: 'grazingCamp', parentSettlementIdx: si });
+      grazingPlaced.push({ x: bestX, y: bestY });
+    }
+  }
+
+  // ── 2. FISHING CAMPS ─────────────────────────────────────────────────────
+  interface FC { x: number; y: number; score: number }
+  const fishingCands: FC[] = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const c = cells[y][x];
+      if (c.riverFlow < 120) continue;
+      if (settDist[fi(x, y)] < 5) continue;
+      let rn = 0;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = x + DX4[d], ny2 = y + DY4[d];
+        if (nx2 >= 0 && nx2 < w && ny2 >= 0 && ny2 < h && cells[ny2][nx2].riverFlow > 80) rn++;
+      }
+      const confluence = rn >= 2;
+      const tidal = nearCoast[fi(x, y)] <= 10;
+      if (!confluence && !tidal && c.riverFlow < 250) continue;
+      fishingCands.push({
+        x, y,
+        score: Math.min(1, c.riverFlow / 400) + (confluence ? 0.4 : 0) + (tidal ? 0.3 : 0),
+      });
+    }
+  }
+  fishingCands.sort((a, b) => b.score - a.score);
+  const targetFishing = 10 + Math.floor(random() * 11);
+  const fishPlaced: { x: number; y: number }[] = [];
+  for (const c of fishingCands) {
+    if (fishPlaced.length >= targetFishing) break;
+    if (!spaceOk(fishPlaced, c.x, c.y, 8)) continue;
+    camps.push({ x: c.x, y: c.y, type: 'fishingCamp' });
+    fishPlaced.push({ x: c.x, y: c.y });
+  }
+
+  // ── 3. GATHERING CAMPS ────────────────────────────────────────────────────
+  // Clay, below treeline, near a path, away from settlements.
+  const gatherCands: FC[] = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const c = cells[y][x];
+      if (c.geology !== GeologyType.Clay) continue;
+      if (c.altitude <= SEA_LEVEL || c.altitude >= TREELINE) continue;
+      if (settDist[fi(x, y)] < 6) continue;
+      if (pathDist[fi(x, y)] > 6) continue;
+      gatherCands.push({ x, y, score: (1 - c.altitude / TREELINE) * 0.5 + random() * 0.5 });
+    }
+  }
+  gatherCands.sort((a, b) => b.score - a.score);
+  const targetGather = 15 + Math.floor(random() * 11);
+  const gatherPlaced: { x: number; y: number }[] = [];
+  for (const c of gatherCands) {
+    if (gatherPlaced.length >= targetGather) break;
+    if (!spaceOk(gatherPlaced, c.x, c.y, 5)) continue;
+    camps.push({ x: c.x, y: c.y, type: 'gatheringCamp' });
+    gatherPlaced.push({ x: c.x, y: c.y });
+  }
+
+  // ── 4. FLINT-MINING CAMPS ─────────────────────────────────────────────────
+  const flintCands: FC[] = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const c = cells[y][x];
+      if (c.geology !== GeologyType.Chalk) continue;
+      if (c.altitude < 0.28 || c.altitude > 0.55) continue;
+      flintCands.push({ x, y, score: c.altitude + random() * 0.2 });
+    }
+  }
+  flintCands.sort((a, b) => b.score - a.score);
+  const targetFlint = 2 + Math.floor(random() * 3);
+  const flintPlaced: { x: number; y: number }[] = [];
+  for (const c of flintCands) {
+    if (flintPlaced.length >= targetFlint) break;
+    if (!spaceOk(flintPlaced, c.x, c.y, 15)) continue;
+    camps.push({ x: c.x, y: c.y, type: 'flintMiningCamp' });
+    flintPlaced.push({ x: c.x, y: c.y });
+  }
+
+  // ── 5. TRADING GATHERING SITES ────────────────────────────────────────────
+  // Settlements with 3+ major-path connections, plus major sacred sites.
+  const majorConns = new Int32Array(settlements.length);
+  for (const p of paths) {
+    if (p.traffic <= 500) continue;
+    majorConns[p.fromIdx]++;
+    majorConns[p.toIdx]++;
+  }
+  const tradingCands: FC[] = [];
+  for (let si = 0; si < settlements.length; si++) {
+    if (majorConns[si] >= 3) {
+      tradingCands.push({
+        x: settlements[si].x, y: settlements[si].y,
+        score: majorConns[si] * 0.3 + random() * 0.1,
+      });
+    }
+  }
+  for (const ms of sacredData.major) {
+    tradingCands.push({ x: ms.x, y: ms.y, score: 0.8 + random() * 0.2 });
+  }
+  tradingCands.sort((a, b) => b.score - a.score);
+  const targetTrading = 3 + Math.floor(random() * 4);
+  const tradingPlaced: { x: number; y: number }[] = [];
+  for (const c of tradingCands) {
+    if (tradingPlaced.length >= targetTrading) break;
+    if (!spaceOk(tradingPlaced, c.x, c.y, 10)) continue;
+    camps.push({ x: c.x, y: c.y, type: 'tradingSite' });
+    tradingPlaced.push({ x: c.x, y: c.y });
+  }
+
+  return { camps };
+}
