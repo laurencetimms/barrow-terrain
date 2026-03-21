@@ -1548,3 +1548,364 @@ export function computePathNetwork(
 
   return { paths };
 }
+
+// ---------------------------------------------------------------------------
+// Step 7: Sacred Sites
+// ---------------------------------------------------------------------------
+
+export type MajorSacredType      = 'greatComplex' | 'stoneCircle' | 'henge';
+export type SignificantSacredType = 'standingStone' | 'barrow' | 'smallStoneCircle' | 'cairn';
+export type SmallSacredType      = 'markedStone' | 'sacredSpring' | 'offeringPool'
+                                 | 'caveEntrance' | 'sacredTree' | 'carvedRockFace';
+
+export interface MajorSacredSite {
+  x: number; y: number;
+  type: MajorSacredType;
+}
+
+export interface SignificantSacredSite {
+  x: number; y: number;
+  type: SignificantSacredType;
+}
+
+export interface SmallSacredFeature {
+  x: number; y: number;
+  type: SmallSacredType;
+  /** Minimum zoom level at which this feature is rendered. */
+  minZoom: number;
+}
+
+export interface SacredData {
+  major:       MajorSacredSite[];
+  significant: SignificantSacredSite[];
+  small:       SmallSacredFeature[];
+}
+
+export function computeSacredSites(
+  terrain:        TerrainMap,
+  foodMap:        FoodResourceMap,
+  settlementData: SettlementData,
+  pathNetwork:    PathNetwork,
+  wightData:      WightData,
+  seed:           string,
+): SacredData {
+  const { width: w, height: h, cells } = terrain;
+  const { nearRiver, nearCoast } = foodMap;
+  const { caveWights, smallFolk } = wightData;
+  const { paths } = pathNetwork;
+  const { random } = createSeededNoise(seed + '\0sacred');
+
+  const SEA_LEVEL = 0.22;
+  const DX4 = [-1, 1, 0, 0];
+  const DY4 = [ 0, 0,-1, 1];
+  // Flat index helpers — cells is cells[y][x]
+  const cell = (x: number, y: number) => cells[y][x];
+  const fi   = (x: number, y: number) => y * w + x;
+  const isLand = (x: number, y: number) => {
+    const g = cells[y][x].geology;
+    return g !== GeologyType.Water && g !== GeologyType.Ice;
+  };
+
+  // ── Summed-area table for fast box-mean altitude queries ──────────────────
+  const SAT = new Float64Array((w + 1) * (h + 1));
+  for (let y = 1; y <= h; y++) {
+    for (let x = 1; x <= w; x++) {
+      SAT[y * (w + 1) + x] =
+        cells[y - 1][x - 1].altitude
+        + SAT[(y - 1) * (w + 1) + x]
+        + SAT[y * (w + 1) + (x - 1)]
+        - SAT[(y - 1) * (w + 1) + (x - 1)];
+    }
+  }
+  const boxMeanAlt = (cx2: number, cy2: number, r: number): number => {
+    const x1 = Math.max(0, cx2 - r), x2 = Math.min(w - 1, cx2 + r);
+    const y1 = Math.max(0, cy2 - r), y2 = Math.min(h - 1, cy2 + r);
+    const sum =
+      SAT[(y2 + 1) * (w + 1) + (x2 + 1)]
+      - SAT[y1 * (w + 1) + (x2 + 1)]
+      - SAT[(y2 + 1) * (w + 1) + x1]
+      + SAT[y1 * (w + 1) + x1];
+    return sum / ((x2 - x1 + 1) * (y2 - y1 + 1));
+  };
+
+  // ── Geology boundary map (flat) ───────────────────────────────────────────
+  const geoBoundary = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!isLand(x, y)) continue;
+      const g = cells[y][x].geology;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = x + DX4[d], ny2 = y + DY4[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        if (cells[ny2][nx2].geology !== g) { geoBoundary[fi(x, y)] = 1; break; }
+      }
+    }
+  }
+
+  // ── Chalk escarpment ──────────────────────────────────────────────────────
+  const chalkEscarpment = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (cells[y][x].geology !== GeologyType.Chalk) continue;
+      const alt = cells[y][x].altitude;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = x + DX4[d], ny2 = y + DY4[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const ng = cells[ny2][nx2].geology;
+        if ((ng === GeologyType.Limestone || ng === GeologyType.Clay) &&
+             cells[ny2][nx2].altitude > alt + 0.03) {
+          chalkEscarpment[fi(x, y)] = 1; break;
+        }
+      }
+    }
+  }
+
+  // ── Major-path BFS proximity (flat index) ─────────────────────────────────
+  const majorPathDist = new Int16Array(w * h).fill(32767);
+  {
+    const q: number[] = [];
+    for (const p of paths) {
+      if (p.traffic <= 500) continue;
+      for (const [px, py] of p.cells) {
+        const pi = fi(px, py);
+        if (majorPathDist[pi] === 32767) { majorPathDist[pi] = 0; q.push(pi); }
+      }
+    }
+    for (let qi = 0; qi < q.length; qi++) {
+      const ci = q[qi];
+      const nd = majorPathDist[ci] + 1;
+      if (nd > 20) continue;
+      const cx2 = ci % w, cy2 = (ci / w) | 0;
+      for (let d = 0; d < 4; d++) {
+        const nx2 = cx2 + DX4[d], ny2 = cy2 + DY4[d];
+        if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+        const ni = fi(nx2, ny2);
+        if (majorPathDist[ni] > nd) { majorPathDist[ni] = nd; q.push(ni); }
+      }
+    }
+  }
+
+  // ── River confluence ──────────────────────────────────────────────────────
+  const isConfluence = new Uint8Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      if (cells[y][x].riverFlow <= 80) continue;
+      let rn = 0;
+      for (let d = 0; d < 4; d++) {
+        if (cells[y + DY4[d]][x + DX4[d]].riverFlow > 80) rn++;
+      }
+      if (rn >= 2) isConfluence[fi(x, y)] = 1;
+    }
+  }
+
+  // ── Wight territory helpers ────────────────────────────────────────────────
+  const inCaveWightCore = (x: number, y: number) =>
+    caveWights.some(t => t.occupied && Math.hypot(x - t.cx, y - t.cy) < t.coreRadius);
+  const inCaveWightPeriphery = (x: number, y: number) =>
+    caveWights.some(t => t.occupied && Math.hypot(x - t.cx, y - t.cy) < t.peripheralRadius);
+  const nearSmallFolk = (x: number, y: number) =>
+    smallFolk.some(t => t.occupied && Math.hypot(x - t.cx, y - t.cy) < t.radius + 3);
+
+  // ── Spacing check ──────────────────────────────────────────────────────────
+  const spaceOk = (placed: { x: number; y: number }[], x: number, y: number, minDist: number) =>
+    placed.every(p => Math.hypot(p.x - x, p.y - y) >= minDist);
+
+  // ── MAJOR SACRED SITES ─────────────────────────────────────────────────────
+  interface Cand { x: number; y: number; score: number }
+  const majorCands: Cand[] = [];
+  for (let y = 3; y < h - 3; y += 3) {
+    for (let x = 3; x < w - 3; x += 3) {
+      if (!isLand(x, y) || cell(x, y).waterLandsType || inCaveWightCore(x, y)) continue;
+      const alt = cell(x, y).altitude;
+      const prominence = Math.max(0, alt - boxMeanAlt(x, y, 20));
+      let score = prominence * 3.5;
+      if (geoBoundary[fi(x, y)])                             score += 0.30;
+      if (chalkEscarpment[fi(x, y)])                         score += 0.25;
+      if (majorPathDist[fi(x, y)] < 15)  score += 0.20 * (1 - majorPathDist[fi(x, y)] / 15);
+      if (inCaveWightPeriphery(x, y))                        score += 0.15;
+      if (isConfluence[fi(x, y)])                            score += 0.10;
+      if (score > 0.15) majorCands.push({ x, y, score });
+    }
+  }
+  majorCands.sort((a, b) => b.score - a.score);
+
+  const major: MajorSacredSite[] = [];
+  const targetMajor = 3 + Math.floor(random() * 3); // 3–5
+  for (const c of majorCands) {
+    if (major.length >= targetMajor) break;
+    if (!spaceOk(major, c.x, c.y, 22)) continue;
+    const type: MajorSacredType = major.length === 0 ? 'greatComplex'
+      : random() < 0.5 ? 'stoneCircle' : 'henge';
+    major.push({ x: c.x, y: c.y, type });
+  }
+
+  // ── SIGNIFICANT SACRED SITES ───────────────────────────────────────────────
+  const allPlaced: { x: number; y: number }[] = [...major];
+  const sigCands: Cand[] = [];
+  for (let y = 2; y < h - 2; y += 2) {
+    for (let x = 2; x < w - 2; x += 2) {
+      if (!isLand(x, y) || cell(x, y).waterLandsType || inCaveWightCore(x, y)) continue;
+      const prominence = Math.max(0, cell(x, y).altitude - boxMeanAlt(x, y, 8));
+      let score = prominence * 2.5;
+      if (chalkEscarpment[fi(x, y)])                                          score += 0.35;
+      if (geoBoundary[fi(x, y)])                                              score += 0.20;
+      if (isConfluence[fi(x, y)])                                             score += 0.20;
+      if (nearCoast[fi(x, y)] <= 2 &&
+          (cell(x, y).geology === GeologyType.Granite ||
+           cell(x, y).geology === GeologyType.Slate))                         score += 0.25;
+      if (inCaveWightPeriphery(x, y))                                         score += 0.15;
+      if (score > 0.05) sigCands.push({ x, y, score });
+    }
+  }
+  sigCands.sort((a, b) => b.score - a.score);
+
+  const significant: SignificantSacredSite[] = [];
+  const targetSig = 20 + Math.floor(random() * 21); // 20–40
+
+  // Region coverage tracking (4 cols × 6 rows = 24 regions)
+  const RGSX = 4, RGSY = 6;
+  const rgCount = new Int32Array(RGSX * RGSY);
+
+  const placeSig = (c: Cand, minSpacing: number): boolean => {
+    if (!spaceOk(allPlaced, c.x, c.y, minSpacing)) return false;
+    const geo = cell(c.x, c.y).geology;
+    const r   = random();
+    let type: SignificantSacredType;
+    if (chalkEscarpment[fi(c.x, c.y)]) {
+      type = 'barrow';
+    } else if (geo === GeologyType.Granite) {
+      type = r < 0.7 ? 'cairn' : 'standingStone';
+    } else if (geo === GeologyType.Limestone) {
+      type = r < 0.5 ? 'smallStoneCircle' : 'standingStone';
+    } else if (geo === GeologyType.Chalk) {
+      type = r < 0.6 ? 'barrow' : 'standingStone';
+    } else {
+      type = r < 0.4 ? 'standingStone' : r < 0.7 ? 'barrow' : r < 0.85 ? 'cairn' : 'smallStoneCircle';
+    }
+    significant.push({ x: c.x, y: c.y, type });
+    allPlaced.push({ x: c.x, y: c.y });
+    const rgx = Math.min(RGSX - 1, (c.x / w * RGSX) | 0);
+    const rgy = Math.min(RGSY - 1, (c.y / h * RGSY) | 0);
+    rgCount[rgy * RGSX + rgx]++;
+    return true;
+  };
+
+  for (const c of sigCands) {
+    if (significant.length >= targetSig) break;
+    placeSig(c, 8);
+  }
+
+  // Coverage pass: ensure every region has ≥ 1 significant site
+  for (let rgy = 0; rgy < RGSY; rgy++) {
+    for (let rgx = 0; rgx < RGSX; rgx++) {
+      if (rgCount[rgy * RGSX + rgx] > 0) continue;
+      const xMin = (rgx       * w / RGSX) | 0;
+      const xMax = ((rgx + 1) * w / RGSX) | 0;
+      const yMin = (rgy       * h / RGSY) | 0;
+      const yMax = ((rgy + 1) * h / RGSY) | 0;
+      for (const c of sigCands) {
+        if (c.x < xMin || c.x >= xMax || c.y < yMin || c.y >= yMax) continue;
+        if (placeSig(c, 5)) break;
+      }
+    }
+  }
+
+  // ── SMALL SACRED FEATURES ──────────────────────────────────────────────────
+  interface SmallCand { x: number; y: number; type: SmallSacredType; minZoom: number; score: number }
+  const smallCands: SmallCand[] = [];
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const c = cells[y][x];
+      if (!isLand(x, y) || c.altitude <= SEA_LEVEL || c.waterLandsType) continue;
+      const geo = c.geology;
+      const alt = c.altitude;
+      const fIdx = fi(x, y);
+      const sfBoost = nearSmallFolk(x, y) ? 0.35 : 0;
+
+      // Spring lines: geology boundary near river
+      if (geoBoundary[fIdx] && nearRiver[fIdx] <= 3 &&
+          (geo === GeologyType.Chalk || geo === GeologyType.Clay ||
+           geo === GeologyType.Limestone)) {
+        smallCands.push({ x, y, type: 'sacredSpring', minZoom: 5,
+          score: 0.6 + sfBoost + random() * 0.2 });
+      }
+
+      // Cave entrances: limestone, moderate altitude, terrain complexity
+      if (geo === GeologyType.Limestone && alt >= 0.28 && alt <= 0.50) {
+        const variance = Math.abs(alt - boxMeanAlt(x, y, 3));
+        if (variance > 0.015) {
+          smallCands.push({ x, y, type: 'caveEntrance', minZoom: 5,
+            score: 0.5 + variance * 5 + random() * 0.2 });
+        }
+      }
+
+      // Glacial erratics
+      if (geo === GeologyType.Glacial) {
+        smallCands.push({ x, y, type: 'markedStone', minZoom: 10,
+          score: 0.3 + random() * 0.3 });
+      }
+
+      // Offering pools: cell lower than all 8 neighbours, near river or limestone
+      {
+        let isPool = true;
+        outer:
+        for (let dy2 = -1; dy2 <= 1; dy2++) {
+          for (let dx2 = -1; dx2 <= 1; dx2++) {
+            if (dx2 === 0 && dy2 === 0) continue;
+            const nx2 = x + dx2, ny2 = y + dy2;
+            if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) { isPool = false; break outer; }
+            if (cells[ny2][nx2].altitude <= alt) { isPool = false; break outer; }
+          }
+        }
+        if (isPool && (nearRiver[fIdx] <= 4 || geo === GeologyType.Limestone)) {
+          smallCands.push({ x, y, type: 'offeringPool', minZoom: 5,
+            score: 0.5 + sfBoost + random() * 0.2 });
+        }
+      }
+
+      // Small hilltops: local altitude maximum at moderate altitude
+      {
+        let isHilltop = true;
+        outer:
+        for (let dy2 = -1; dy2 <= 1; dy2++) {
+          for (let dx2 = -1; dx2 <= 1; dx2++) {
+            if (dx2 === 0 && dy2 === 0) continue;
+            const nx2 = x + dx2, ny2 = y + dy2;
+            if (nx2 < 0 || nx2 >= w || ny2 < 0 || ny2 >= h) continue;
+            if (cells[ny2][nx2].altitude >= alt) { isHilltop = false; break outer; }
+          }
+        }
+        if (isHilltop && alt >= 0.28 && alt < 0.70) {
+          let type: SmallSacredType;
+          if (geo === GeologyType.Sandstone)                               type = 'markedStone';
+          else if (geo === GeologyType.Granite || geo === GeologyType.Slate) type = 'carvedRockFace';
+          else if (geo === GeologyType.Clay)                               type = 'sacredTree';
+          else                                                             type = 'markedStone';
+          smallCands.push({ x, y, type, minZoom: 5,
+            score: 0.4 + boxMeanAlt(x, y, 4) * 0.5 + random() * 0.2 });
+        }
+      }
+
+      // Sandstone boundary outcrops
+      if (geo === GeologyType.Sandstone && geoBoundary[fIdx]) {
+        smallCands.push({ x, y, type: 'markedStone', minZoom: 10,
+          score: 0.25 + random() * 0.25 });
+      }
+    }
+  }
+
+  smallCands.sort((a, b) => b.score - a.score);
+  const targetSmall = 80 + Math.floor(random() * 71); // 80–150
+  const allPlacedSmall: { x: number; y: number }[] = [...allPlaced];
+  const small: SmallSacredFeature[] = [];
+
+  for (const c of smallCands) {
+    if (small.length >= targetSmall) break;
+    if (!spaceOk(allPlacedSmall, c.x, c.y, 4)) continue;
+    small.push({ x: c.x, y: c.y, type: c.type, minZoom: c.minZoom });
+    allPlacedSmall.push({ x: c.x, y: c.y });
+  }
+
+  return { major, significant, small };
+}

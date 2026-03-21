@@ -7,6 +7,7 @@ import {
   computeCarryingCapacity, CarryingCapacity,
   computeSettlements, SettlementData,
   computePathNetwork, PathNetwork,
+  computeSacredSites, SacredData,
 } from "./habitation";
 import {
   renderTerrainToBuffer,
@@ -25,6 +26,7 @@ let currentWightData: WightData | null = null;
 let currentCarrying: CarryingCapacity | null = null;
 let currentSettlements: SettlementData | null = null;
 let currentPathNetwork: PathNetwork | null = null;
+let currentSacred: SacredData | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -298,6 +300,20 @@ function logSettlementStats(sd: SettlementData): void {
   );
 }
 
+function logSacredStats(sd: SacredData): void {
+  const byType = (arr: { type: string }[], t: string) => arr.filter(s => s.type === t).length;
+  const maj = sd.major.map(s => s.type).join(', ') || 'none';
+  const sigTypes = ['standingStone','barrow','smallStoneCircle','cairn'];
+  const smTypes  = ['markedStone','sacredSpring','offeringPool','caveEntrance','sacredTree','carvedRockFace'];
+  const sigBreak = sigTypes.map(t => `${t} ×${byType(sd.significant, t)}`).filter(s => !s.endsWith('×0')).join(', ');
+  const smBreak  = smTypes.map(t =>  `${t} ×${byType(sd.small, t)}`).filter(s => !s.endsWith('×0')).join(', ');
+  console.log(
+    `[Sacred] major (${sd.major.length}): ${maj}` +
+    ` · significant (${sd.significant.length}): ${sigBreak}` +
+    ` · small (${sd.small.length}): ${smBreak}`
+  );
+}
+
 function logPathStats(pn: PathNetwork): void {
   const { paths } = pn;
   const major  = paths.filter(p => p.traffic > 500).length;
@@ -353,6 +369,8 @@ function generate(seed: string): void {
   logSettlementStats(currentSettlements);
   currentPathNetwork = computePathNetwork(currentTerrain, currentSettlements);
   logPathStats(currentPathNetwork);
+  currentSacred = computeSacredSites(currentTerrain, currentFoodMap, currentSettlements, currentPathNetwork, currentWightData, seed);
+  logSacredStats(currentSacred);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map
