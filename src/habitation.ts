@@ -38,6 +38,12 @@ export interface FoodResourceMap {
   grid:             FoodResources[];
   wolfTerritories:  PredatorTerritory[];
   bearRanges:       PredatorTerritory[];
+  /** BFS distance to nearest river cell, capped at 10. */
+  nearRiver:        Int16Array;
+  /** BFS distance to nearest coast cell, capped at 10. */
+  nearCoast:        Int16Array;
+  /** BFS distance to nearest water-lands cell, capped at 8. */
+  nearWaterLands:   Int16Array;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +414,7 @@ export function computeFoodResources(
     }
   }
 
-  return { width, height, grid, wolfTerritories, bearRanges };
+  return { width, height, grid, wolfTerritories, bearRanges, nearRiver, nearCoast, nearWaterLands };
 }
 
 // ---------------------------------------------------------------------------
@@ -571,4 +577,130 @@ export function generateWightTerritories(
   }));
 
   return { caveWights, smallFolk };
+}
+
+// ---------------------------------------------------------------------------
+// Step 3: Carrying Capacity
+// ---------------------------------------------------------------------------
+
+export interface CarryingCapacity {
+  width:       number;
+  height:      number;
+  /** Habitability score per cell, flat [y * width + x], values 0..1. */
+  habitability: Float32Array;
+}
+
+/**
+ * Computes a habitability score (0..1) for every coarse cell.
+ *
+ * Factors (applied in order):
+ *   1. Base geology productivity
+ *   2. Altitude modifier (full below treeline, ×0.3 above, ×0.1 well above)
+ *   3. Water access (×1.3 near river, ×1.2 near coast, ×0.6 if far from all water)
+ *   4. Animal bonus (up to +0.15 from food resource density)
+ *   5. Cave-wight suppression (×0.1 in core, ×0.5 in peripheral)
+ *   6. Water-lands override (raised/carr ground uses fishing/fowling base 0.3;
+ *      submerged/reed/mud cells are uninhabitable and score 0)
+ */
+export function computeCarryingCapacity(
+  terrain:   TerrainMap,
+  foodMap:   FoodResourceMap,
+  wightData: WightData
+): CarryingCapacity {
+  const { width, height, cells } = terrain;
+  const treeline = 0.45;
+  const highAlt  = 0.55;
+
+  const { nearRiver, nearCoast, grid: foodGrid } = foodMap;
+
+  // ── Cave-wight suppression grid (1.0 = no suppression) ────────────────────
+  const suppression = new Float32Array(width * height).fill(1.0);
+  for (const t of wightData.caveWights) {
+    if (!t.occupied) continue;
+    const maxR = t.peripheralRadius + 1;
+    const x0 = Math.max(0, t.cx - maxR);
+    const x1 = Math.min(width - 1, t.cx + maxR);
+    const y0 = Math.max(0, t.cy - maxR);
+    const y1 = Math.min(height - 1, t.cy + maxR);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dist = Math.hypot(x - t.cx, y - t.cy);
+        const factor = dist <= t.coreRadius ? 0.10
+          : dist <= t.peripheralRadius      ? 0.50
+          : 1.0;
+        const idx = y * width + x;
+        if (factor < suppression[idx]) suppression[idx] = factor;
+      }
+    }
+  }
+
+  // ── Per-cell habitability ──────────────────────────────────────────────────
+  const habitability = new Float32Array(width * height);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      const { geology: geo, altitude: alt, waterLandsType } = cell;
+      const idx = y * width + x;
+
+      // Water and ice: not habitable
+      if (geo === GeologyType.Water || geo === GeologyType.Ice) continue;
+
+      let h: number;
+
+      // ── Water-lands: different model for raised / submerged ground ─────────
+      if (waterLandsType !== undefined) {
+        if (waterLandsType === 'raisedIsland' || waterLandsType === 'carrWoodland') {
+          // Habitable raised ground within water-lands: fishing/fowling base
+          h = 0.30;
+        } else {
+          // Reed bed, mud flat, open water, tidal channel: not habitable
+          continue;
+        }
+      } else {
+        // ── 1. Base geology productivity ───────────────────────────────────
+        switch (geo) {
+          case GeologyType.Clay:      h = 1.00; break;
+          case GeologyType.Chalk:     h = 0.85; break;
+          case GeologyType.Limestone: h = 0.65; break;
+          case GeologyType.Sandstone: h = 0.45; break;
+          case GeologyType.Slate:     h = 0.35; break;
+          case GeologyType.Granite:   h = 0.20; break;
+          case GeologyType.Glacial:   h = 0.05; break;
+          default: h = 0;
+        }
+
+        // ── 2. Altitude modifier ───────────────────────────────────────────
+        if (alt >= highAlt) {
+          h *= 0.10;
+        } else if (alt >= treeline) {
+          h *= 0.30;
+        }
+        // below treeline: no modifier (×1.0)
+      }
+
+      // ── 3. Water access modifier ───────────────────────────────────────────
+      const rDist = nearRiver[idx];
+      const cDist = nearCoast[idx];
+      if (rDist <= 3) {
+        h *= 1.30;
+      } else if (cDist <= 3) {
+        h *= 1.20;
+      } else if (rDist > 8 && cDist > 8) {
+        h *= 0.60;
+      }
+
+      // ── 4. Animal bonus (up to +0.15) ─────────────────────────────────────
+      const food = foodGrid[idx];
+      const animalScore = Math.max(food.deer, food.fish, food.boar * 0.7);
+      h += animalScore * 0.15;
+
+      // ── 5. Cave-wight suppression ──────────────────────────────────────────
+      h *= suppression[idx];
+
+      habitability[idx] = Math.min(1, Math.max(0, h));
+    }
+  }
+
+  return { width, height, habitability };
 }

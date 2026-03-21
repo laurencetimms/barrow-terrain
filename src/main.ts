@@ -1,7 +1,11 @@
 import { createSeededNoise } from "./noise";
 import { generateTerrain, TerrainMap, TerrainCell } from "./terrain";
 import { GEOLOGY_INFO } from "./geology";
-import { computeFoodResources, FoodResourceMap, generateWightTerritories, WightData } from "./habitation";
+import {
+  computeFoodResources, FoodResourceMap,
+  generateWightTerritories, WightData,
+  computeCarryingCapacity, CarryingCapacity,
+} from "./habitation";
 import {
   renderTerrainToBuffer,
   bakeVegetationNoise,
@@ -16,6 +20,7 @@ import {
 let currentTerrain: TerrainMap | null = null;
 let currentFoodMap: FoodResourceMap | null = null;
 let currentWightData: WightData | null = null;
+let currentCarrying: CarryingCapacity | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -268,6 +273,21 @@ function logFoodStats(fm: FoodResourceMap): void {
   );
 }
 
+function logCarryingStats(cc: CarryingCapacity): void {
+  const { habitability: h } = cc;
+  let sum = 0, nonZero = 0, high = 0;
+  for (const v of h) {
+    sum += v;
+    if (v > 0) nonZero++;
+    if (v > 0.6) high++;
+  }
+  console.log(
+    `[Carrying] mean hab ${(sum / h.length).toFixed(3)}` +
+    ` · habitable cells ${nonZero}/${h.length}` +
+    ` · high-hab (>0.6) cells ${high}`
+  );
+}
+
 function logWightStats(w: WightData): void {
   const caveOcc = w.caveWights.filter(t => t.occupied).length;
   const sfOcc   = w.smallFolk.filter(t => t.occupied).length;
@@ -289,6 +309,8 @@ function generate(seed: string): void {
   logFoodStats(currentFoodMap);
   currentWightData = generateWightTerritories(currentTerrain, seed);
   logWightStats(currentWightData);
+  currentCarrying = computeCarryingCapacity(currentTerrain, currentFoodMap, currentWightData);
+  logCarryingStats(currentCarrying);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map
