@@ -276,18 +276,23 @@ function logFoodStats(fm: FoodResourceMap): void {
 }
 
 function logSettlementStats(sd: SettlementData): void {
-  const { settlements, fords } = sd;
+  const { settlements, fords, abandoned } = sd;
   const land = settlements.filter(s => !s.isWaterLands);
   const wl   = settlements.filter(s => s.isWaterLands);
   const totalPop = settlements.reduce((s, t) => s + t.population, 0);
   const walled = settlements.find(s => s.isWalledTown);
   const bySz = (sz: string) => land.filter(s => s.size === sz).length;
+  const byReason = (r: string) => abandoned.filter(a => a.reason === r).length;
   console.log(
     `[Settlements] ${settlements.length} total (${land.length} land, ${wl.length} water-lands)` +
     ` · pop ${totalPop.toLocaleString()}` +
     ` · towns ${bySz('town')}, villages ${bySz('village')}, hamlets ${bySz('hamlet')}, homesteads ${bySz('homestead')}` +
     ` · fords ${fords.length}` +
     (walled ? ` · walled town @ (${walled.x},${walled.y}) pop ${walled.population}` : '')
+  );
+  console.log(
+    `[Abandoned] ${abandoned.length} sites` +
+    ` · waterRose ${byReason('waterRose')}, iceAdvanced ${byReason('iceAdvanced')}, landMarginal ${byReason('landMarginal')}`
   );
 }
 

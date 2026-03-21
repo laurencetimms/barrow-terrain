@@ -1042,5 +1042,110 @@ export function computeSettlements(
     if (settlements.filter(s => s.isWaterLands).length >= 25) break;
   }
 
-  return { settlements, fords };
+  // ── Step 5: Abandoned Settlements ─────────────────────────────────────────
+  //
+  // Historical landscape modifications applied to each cell:
+  //   • Water-lands with alt in [0.19, 0.22): were exposed clay land when
+  //     the water level was 0.03 lower → historical hab 0.36
+  //   • Any coast cell (Water, not water-lands) with alt in [0.19, 0.22):
+  //     submerged by sea-level rise → historical hab 0.32
+  //   • Northern cells (ny > 0.55) currently at hab 0–0.30: climate was
+  //     marginally warmer → historical hab ×1.20, reason 'iceAdvanced' if ny > 0.60
+  //   • Any other cell with hab 0.20–0.30: generally better past conditions
+  //     → historical hab ×1.20
+  //
+  // A cell becomes an abandoned-settlement candidate if:
+  //   histHab > MIN_SCORE (0.30) AND currentHab ≤ MIN_SCORE AND not claimed.
+
+  const SEA_LEVEL     = 0.22;
+  const HIST_SEA_DROP = 0.03;
+  const HIST_SEA      = SEA_LEVEL - HIST_SEA_DROP; // 0.19
+
+  type HistCandidate = { x: number; y: number; histHab: number; reason: AbandonedReason };
+  const histCandidates: HistCandidate[] = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (claimed[idx]) continue;
+
+      const cell   = cells[y][x];
+      const curHab = habitability[idx];
+      const { geology: geo, altitude: alt, waterLandsType, ny } = cell;
+
+      let histHab: number;
+      let reason:  AbandonedReason;
+
+      if (geo === GeologyType.Water && waterLandsType !== undefined) {
+        // Water-lands cell now submerged; was marginal wetland clay historically
+        if (alt >= HIST_SEA && alt < SEA_LEVEL) {
+          histHab = 0.36;
+          reason  = 'waterRose';
+        } else {
+          continue; // deeper open water — was always water
+        }
+      } else if (geo === GeologyType.Water && cell.isCoast) {
+        // Coastal cell submerged by sea-level rise
+        if (alt >= HIST_SEA && alt < SEA_LEVEL) {
+          histHab = 0.32;
+          reason  = 'waterRose';
+        } else {
+          continue;
+        }
+      } else if (ny > 0.55 && curHab < MIN_SCORE && curHab > 0) {
+        // Northern marginal land — climate shift pushed it below viability
+        histHab = curHab * 1.20;
+        reason  = ny > 0.60 ? 'iceAdvanced' : 'landMarginal';
+      } else if (curHab >= 0.20 && curHab < MIN_SCORE) {
+        // Cells just below the modern habitability threshold
+        histHab = curHab * 1.20;
+        reason  = 'landMarginal';
+      } else {
+        continue;
+      }
+
+      if (histHab <= MIN_SCORE) continue; // still not viable historically
+
+      histCandidates.push({ x, y, histHab, reason });
+    }
+  }
+
+  histCandidates.sort((a, b) => b.histHab - a.histHab);
+
+  const abandoned: AbandonedSettlement[] = [];
+  const MIN_ABANDONED_SPACING = 8;
+  const ABANDONED_TARGET      = 15;
+
+  for (const c of histCandidates) {
+    if (abandoned.length >= ABANDONED_TARGET) break;
+    const tooClose = abandoned.some(
+      a => Math.hypot(a.x - c.x, a.y - c.y) < MIN_ABANDONED_SPACING
+    );
+    if (tooClose) continue;
+
+    // Estimate historical population from a small nominal catchment
+    const nominalR   = 4;
+    let histPopSum   = 0;
+    for (let dy = -nominalR; dy <= nominalR; dy++) {
+      for (let dx = -nominalR; dx <= nominalR; dx++) {
+        if (dx * dx + dy * dy > nominalR * nominalR) continue;
+        const nx2 = c.x + dx, ny2 = c.y + dy;
+        if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+        // Use the greater of current or historical hab for neighbours
+        const nIdx    = ny2 * width + nx2;
+        const nCurHab = habitability[nIdx];
+        histPopSum += Math.max(nCurHab, c.histHab * 0.6); // neighbours less boosted
+      }
+    }
+    const histPop = Math.round(histPopSum * DENSITY);
+    const historicalSize: SettlementSize =
+      histPop >= 100 ? 'town'
+      : histPop >= 40 ? 'village'
+      : histPop >= 15 ? 'hamlet'
+      : 'homestead';
+
+    abandoned.push({ x: c.x, y: c.y, historicalSize, reason: c.reason });
+  }
+
+  return { settlements, fords, abandoned };
 }
