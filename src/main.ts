@@ -5,6 +5,7 @@ import {
   computeFoodResources, FoodResourceMap,
   generateWightTerritories, WightData,
   computeCarryingCapacity, CarryingCapacity,
+  computeSettlements, SettlementData,
 } from "./habitation";
 import {
   renderTerrainToBuffer,
@@ -21,6 +22,7 @@ let currentTerrain: TerrainMap | null = null;
 let currentFoodMap: FoodResourceMap | null = null;
 let currentWightData: WightData | null = null;
 let currentCarrying: CarryingCapacity | null = null;
+let currentSettlements: SettlementData | null = null;
 let currentBuffer: ImageData | null = null;
 let viewport: Viewport = { cx: 150, cy: 250, zoom: 1 };
 let showVegetation = false;
@@ -273,6 +275,22 @@ function logFoodStats(fm: FoodResourceMap): void {
   );
 }
 
+function logSettlementStats(sd: SettlementData): void {
+  const { settlements, fords } = sd;
+  const land = settlements.filter(s => !s.isWaterLands);
+  const wl   = settlements.filter(s => s.isWaterLands);
+  const totalPop = settlements.reduce((s, t) => s + t.population, 0);
+  const walled = settlements.find(s => s.isWalledTown);
+  const bySz = (sz: string) => land.filter(s => s.size === sz).length;
+  console.log(
+    `[Settlements] ${settlements.length} total (${land.length} land, ${wl.length} water-lands)` +
+    ` · pop ${totalPop.toLocaleString()}` +
+    ` · towns ${bySz('town')}, villages ${bySz('village')}, hamlets ${bySz('hamlet')}, homesteads ${bySz('homestead')}` +
+    ` · fords ${fords.length}` +
+    (walled ? ` · walled town @ (${walled.x},${walled.y}) pop ${walled.population}` : '')
+  );
+}
+
 function logCarryingStats(cc: CarryingCapacity): void {
   const { habitability: h } = cc;
   let sum = 0, nonZero = 0, high = 0;
@@ -311,6 +329,8 @@ function generate(seed: string): void {
   logWightStats(currentWightData);
   currentCarrying = computeCarryingCapacity(currentTerrain, currentFoodMap, currentWightData);
   logCarryingStats(currentCarrying);
+  currentSettlements = computeSettlements(currentTerrain, currentFoodMap, currentCarrying, currentWightData);
+  logSettlementStats(currentSettlements);
   highResCache = null;
   pendingBounds = null;
   pendingRequestId++; // invalidate any in-flight patch from the previous map

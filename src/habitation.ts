@@ -704,3 +704,333 @@ export function computeCarryingCapacity(
 
   return { width, height, habitability };
 }
+
+// ---------------------------------------------------------------------------
+// Step 4: Permanent Settlements
+// ---------------------------------------------------------------------------
+
+export type SettlementSize = 'homestead' | 'hamlet' | 'village' | 'town';
+
+export interface Settlement {
+  x:               number;
+  y:               number;
+  population:      number;
+  size:            SettlementSize;
+  isWalledTown:    boolean;
+  isWaterLands:    boolean;
+  catchmentRadius: number;
+}
+
+export interface Ford {
+  x: number;
+  y: number;
+}
+
+export interface SettlementData {
+  settlements: Settlement[];
+  fords:       Ford[];
+}
+
+// ---------------------------------------------------------------------------
+// Ford identification
+// ---------------------------------------------------------------------------
+
+/**
+ * Scans for river cells that are shallow and crossable on foot.
+ * A ford: riverFlow in (RIVER_THRESHOLD, FORD_MAX_FLOW), and at least one
+ * orthogonal non-river neighbour whose altitude is within 0.02 of the
+ * river cell (low bank = shallow water).
+ */
+export function identifyFords(terrain: TerrainMap): Ford[] {
+  const { width, height, cells } = terrain;
+  const RIVER_MIN  =  80;
+  const FORD_MAX   = 300;
+  const fords: Ford[] = [];
+  const dirs: [number, number][] = [[0,-1],[0,1],[-1,0],[1,0]];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      if (cell.riverFlow <= RIVER_MIN || cell.riverFlow >= FORD_MAX) continue;
+      for (const [dx, dy] of dirs) {
+        const nx2 = x + dx, ny2 = y + dy;
+        if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+        const nb = cells[ny2][nx2];
+        if (nb.riverFlow > RIVER_MIN) continue; // skip river cells
+        if (Math.abs(nb.altitude - cell.altitude) < 0.02) {
+          fords.push({ x, y });
+          break;
+        }
+      }
+    }
+  }
+  return fords;
+}
+
+// ---------------------------------------------------------------------------
+// Settlement placement
+// ---------------------------------------------------------------------------
+
+/**
+ * Places permanent settlements using greedy catchment-claiming.
+ *
+ * Phase 1 — mainland: candidates scored by habitability, catchment average,
+ * ford/confluence/geology-boundary/coast bonuses. Placed highest-score-first;
+ * once a cell is claimed by a catchment no other settlement can use it.
+ *
+ * Phase 2 — water-lands: raised-ground cells within the water-lands zone,
+ * scored by island size, channel proximity, and food density.
+ *
+ * The first mainland settlement placed (highest score) is the walled town.
+ */
+export function computeSettlements(
+  terrain:   TerrainMap,
+  foodMap:   FoodResourceMap,
+  carrying:  CarryingCapacity,
+  wightData: WightData,
+): SettlementData {
+  const { width, height, cells } = terrain;
+  const { habitability } = carrying;
+  const { nearRiver, nearCoast, grid: foodGrid } = foodMap;
+
+  // ── Fords ──────────────────────────────────────────────────────────────────
+  const fords = identifyFords(terrain);
+  const fordSet = new Set(fords.map(f => f.y * width + f.x));
+
+  // ── Confluences: river cells with 3+ river orthogonal neighbours ───────────
+  const confluenceSet = new Set<number>();
+  const dirs4: [number,number][] = [[0,-1],[0,1],[-1,0],[1,0]];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (cells[y][x].riverFlow <= 80) continue;
+      let rn = 0;
+      for (const [dx, dy] of dirs4) {
+        const nx2 = x + dx, ny2 = y + dy;
+        if (nx2 >= 0 && nx2 < width && ny2 >= 0 && ny2 < height
+            && cells[ny2][nx2].riverFlow > 80) rn++;
+      }
+      if (rn >= 3) confluenceSet.add(y * width + x);
+    }
+  }
+
+  // ── BFS proximity maps ─────────────────────────────────────────────────────
+  const nearFord = bfsProximity(width, height, 5,
+    i => fordSet.has(i));
+
+  const nearConfluence = bfsProximity(width, height, 4,
+    i => confluenceSet.has(i));
+
+  // Spring-line: chalk-clay geological boundary
+  const nearSpringLine = bfsProximity(width, height, 5, i => {
+    const x = i % width, y = (i - x) / width;
+    const geo = cells[y][x].geology;
+    if (geo !== GeologyType.Chalk && geo !== GeologyType.Clay) return false;
+    for (const [dx, dy] of dirs4) {
+      const nx2 = x + dx, ny2 = y + dy;
+      if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+      const nb = cells[ny2][nx2].geology;
+      if ((geo === GeologyType.Chalk && nb === GeologyType.Clay) ||
+          (geo === GeologyType.Clay  && nb === GeologyType.Chalk)) return true;
+    }
+    return false;
+  });
+
+  // Any geological boundary (for the +0.1 scoring bonus)
+  const nearGeoBoundary = bfsProximity(width, height, 3, i => {
+    const x = i % width, y = (i - x) / width;
+    const geo = cells[y][x].geology;
+    if (geo === GeologyType.Water || geo === GeologyType.Ice) return false;
+    for (const [dx, dy] of dirs4) {
+      const nx2 = x + dx, ny2 = y + dy;
+      if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+      const nb = cells[ny2][nx2].geology;
+      if (nb !== geo && nb !== GeologyType.Water && nb !== GeologyType.Ice) return true;
+    }
+    return false;
+  });
+
+  // ── Cave-wight core exclusion ──────────────────────────────────────────────
+  const inWightCore = new Uint8Array(width * height);
+  for (const t of wightData.caveWights) {
+    if (!t.occupied) continue;
+    const r = t.coreRadius;
+    for (let y = Math.max(0, t.cy - r); y <= Math.min(height - 1, t.cy + r); y++) {
+      for (let x = Math.max(0, t.cx - r); x <= Math.min(width - 1, t.cx + r); x++) {
+        if (Math.hypot(x - t.cx, y - t.cy) <= r) inWightCore[y * width + x] = 1;
+      }
+    }
+  }
+
+  // ── Score all mainland candidates ──────────────────────────────────────────
+  interface Scored { x: number; y: number; score: number }
+  const candidates: Scored[] = [];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const cell = cells[y][x];
+      const hab  = habitability[idx];
+
+      if (hab <= 0.30) continue;
+      if (cell.geology === GeologyType.Water || cell.geology === GeologyType.Ice) continue;
+      if (cell.waterLandsType !== undefined) continue; // water-lands handled separately
+      if (inWightCore[idx]) continue;
+
+      const rDist  = nearRiver[idx];
+      const cDist  = nearCoast[idx];
+      const slDist = nearSpringLine[idx];
+      // Must be near water access (river, spring-line, or coast)
+      if (rDist > 3 && slDist > 3 && cDist > 3) continue;
+
+      // Average habitability within 5-cell radius (hinterland quality)
+      let sumH = 0, cnt = 0;
+      for (let dy = -5; dy <= 5; dy++) {
+        for (let dx = -5; dx <= 5; dx++) {
+          if (dx * dx + dy * dy > 25) continue;
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          sumH += habitability[ny2 * width + nx2];
+          cnt++;
+        }
+      }
+      const hAvg = cnt > 0 ? sumH / cnt : 0;
+
+      let score = hab * 0.30 + hAvg * 0.70;
+      if (nearFord[idx]        <= 2) score += 0.30;
+      if (nearConfluence[idx]  <= 2) score += 0.20;
+      if (nearGeoBoundary[idx] <= 1) score += 0.10;
+      if (cDist                <= 3) score += 0.15;
+
+      candidates.push({ x, y, score });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  // ── Greedy placement ───────────────────────────────────────────────────────
+  const DENSITY   = 5.0;   // people per unit-habitability per cell
+  const MAX_POP   = 250000;
+  const MIN_SCORE = 0.25;
+
+  const claimed    = new Uint8Array(width * height);
+  const settlements: Settlement[] = [];
+  let totalPop     = 0;
+  let walledTown   = false;
+
+  for (const c of candidates) {
+    if (c.score < MIN_SCORE || totalPop >= MAX_POP) break;
+    const idx = c.y * width + c.x;
+    if (claimed[idx]) continue;
+
+    // Catchment radius: larger for less productive land
+    let sumC = 0, cntC = 0;
+    for (let dy = -5; dy <= 5; dy++) {
+      for (let dx = -5; dx <= 5; dx++) {
+        if (dx * dx + dy * dy > 25) continue;
+        const nx2 = c.x + dx, ny2 = c.y + dy;
+        if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+        sumC += habitability[ny2 * width + nx2];
+        cntC++;
+      }
+    }
+    const avgH  = cntC > 0 ? sumC / cntC : 0;
+    const catchR = Math.max(3, Math.round(3 + (1 - avgH) * 4));
+
+    // Population = sum of catchment habitability × density factor
+    let popSum = 0;
+    for (let dy = -catchR; dy <= catchR; dy++) {
+      for (let dx = -catchR; dx <= catchR; dx++) {
+        if (dx * dx + dy * dy > catchR * catchR) continue;
+        const nx2 = c.x + dx, ny2 = c.y + dy;
+        if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+        popSum += habitability[ny2 * width + nx2];
+      }
+    }
+    const pop = Math.round(popSum * DENSITY);
+    if (pop < 5) continue;
+
+    // Claim catchment
+    for (let dy = -catchR; dy <= catchR; dy++) {
+      for (let dx = -catchR; dx <= catchR; dx++) {
+        if (dx * dx + dy * dy > catchR * catchR) continue;
+        const nx2 = c.x + dx, ny2 = c.y + dy;
+        if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+        claimed[ny2 * width + nx2] = 1;
+      }
+    }
+
+    const size: SettlementSize =
+      pop >= 100 ? 'town'
+      : pop >= 40 ? 'village'
+      : pop >= 15 ? 'hamlet'
+      : 'homestead';
+
+    // First placed (highest score) = walled town
+    const isWalledTown = !walledTown && size === 'town';
+    if (isWalledTown) walledTown = true;
+
+    settlements.push({ x: c.x, y: c.y, population: pop, size, isWalledTown,
+      isWaterLands: false, catchmentRadius: catchR });
+    totalPop += pop;
+  }
+
+  // ── Water-lands settlements ────────────────────────────────────────────────
+  // Raised ground (raisedIsland, carrWoodland) within the water-lands.
+  // Scored by island size, channel proximity, food density.
+
+  const nearChannel = bfsProximity(width, height, 5, i => {
+    const x = i % width, y = (i - x) / width;
+    const wlt = cells[y][x].waterLandsType;
+    return wlt === 'openWater' || wlt === 'tidalChannel';
+  });
+
+  const wlCandidates: Scored[] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = cells[y][x];
+      if (cell.waterLandsType !== 'raisedIsland' && cell.waterLandsType !== 'carrWoodland') continue;
+
+      // Island size: count contiguous raised-ground cells within radius 3
+      let islandCells = 0;
+      for (let dy = -3; dy <= 3; dy++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          if (dx * dx + dy * dy > 9) continue;
+          const nx2 = x + dx, ny2 = y + dy;
+          if (nx2 < 0 || nx2 >= width || ny2 < 0 || ny2 >= height) continue;
+          const wlt = cells[ny2][nx2].waterLandsType;
+          if (wlt === 'raisedIsland' || wlt === 'carrWoodland') islandCells++;
+        }
+      }
+      if (islandCells < 2) continue; // too small to settle
+
+      const idx      = y * width + x;
+      const food     = foodGrid[idx];
+      const chDist   = nearChannel[idx];
+      const chScore  = chDist <= 1 ? 1.0 : chDist <= 3 ? 0.6 : chDist <= 5 ? 0.3 : 0;
+
+      const score = (islandCells / 12) + chScore * 0.35 + food.fish * 0.30 + food.wildfowl * 0.20;
+      wlCandidates.push({ x, y, score });
+    }
+  }
+  wlCandidates.sort((a, b) => b.score - a.score);
+
+  for (const c of wlCandidates) {
+    // Minimum 5-cell spacing between water-lands settlements
+    const tooClose = settlements.some(
+      s => s.isWaterLands && Math.hypot(s.x - c.x, s.y - c.y) < 5
+    );
+    if (tooClose) continue;
+
+    const idx  = c.y * width + c.x;
+    const food = foodGrid[idx];
+    const pop  = Math.max(10, Math.round((food.fish * 0.5 + food.wildfowl * 0.3 + 0.3) * 25));
+
+    settlements.push({ x: c.x, y: c.y, population: Math.min(pop, 30), size: 'hamlet',
+      isWalledTown: false, isWaterLands: true, catchmentRadius: 2 });
+    totalPop += pop;
+
+    if (settlements.filter(s => s.isWaterLands).length >= 25) break;
+  }
+
+  return { settlements, fords };
+}
