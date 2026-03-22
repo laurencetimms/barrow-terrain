@@ -1504,47 +1504,13 @@ export function computePathNetwork(
   }
 
   // ── Traffic scoring ─────────────────────────────────────────────────────────
-  // Build adjacency list on the settlement graph, then BFS from each settlement,
-  // adding its population to every path reachable through the network.
-
-  const adjList: { toIdx: number; pathIdx: number }[][] = Array.from(
-    { length: settlements.length }, () => []
-  );
+  // Traffic on each path = sum of the populations of its two endpoint settlements.
+  // This gives natural variation: town–village routes are busier than
+  // homestead tracks, without every path in a connected network scoring identically.
   for (let pi = 0; pi < paths.length; pi++) {
     const { fromIdx, toIdx } = paths[pi];
-    adjList[fromIdx].push({ toIdx, pathIdx: pi });
-    adjList[toIdx].push({ toIdx: fromIdx, pathIdx: pi });
+    paths[pi].traffic = settlements[fromIdx].population + settlements[toIdx].population;
   }
-
-  const trafficArr = new Float32Array(paths.length);
-  const visitBuf   = new Uint8Array(settlements.length);
-  const visitQ:    number[] = [];
-
-  for (let si = 0; si < settlements.length; si++) {
-    const pop = settlements[si].population;
-    if (pop <= 0) continue;
-
-    // BFS through path graph from si
-    visitBuf[si] = 1;
-    visitQ.length = 0;
-    visitQ.push(si);
-
-    for (let qi = 0; qi < visitQ.length; qi++) {
-      const cur = visitQ[qi];
-      for (const { toIdx, pathIdx } of adjList[cur]) {
-        trafficArr[pathIdx] += pop;
-        if (!visitBuf[toIdx]) {
-          visitBuf[toIdx] = 1;
-          visitQ.push(toIdx);
-        }
-      }
-    }
-
-    // Reset visit buffer
-    for (const idx of visitQ) visitBuf[idx] = 0;
-  }
-
-  for (let pi = 0; pi < paths.length; pi++) paths[pi].traffic = trafficArr[pi];
 
   return { paths };
 }
