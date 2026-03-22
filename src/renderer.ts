@@ -609,9 +609,8 @@ const HAB_KEY_ENTRIES: HabKeyEntry[] = [
   { label: 'Significant sacred',styles: { borderRadius:'50%', background:'#c8b070' } },
   { label: 'Small sacred',      styles: { borderRadius:'50%', background:'rgba(200,176,112,0.65)' } },
   { label: 'Seasonal camp',     styles: { borderRadius:'50%', background:'#ffffff' } },
-  { label: 'Trade route',       styles: { height:'2px', borderRadius:'1px', background:'#228844', marginTop:'3px' } },
-  { label: 'Local path',        styles: { height:'2px', borderRadius:'1px', background:'#ddcc00', marginTop:'3px' } },
-  { label: 'Track',             styles: { height:'2px', borderRadius:'1px', background:'#eedd88', marginTop:'3px' } },
+  { label: 'Trade route',       styles: { height:'2px', borderRadius:'1px', background:'#7a6a50', marginTop:'3px' } },
+  { label: 'Local path',        styles: { height:'2px', borderRadius:'1px', background:'#9a8a70', marginTop:'3px' } },
 ];
 
 /**

@@ -187,9 +187,10 @@ function renderHabitationOverlay(): void {
   // ── Paths (3 passes: major → local → minor) ──────────────────────────────
   const pathStyles: [number, number, number, string, number][] = [
     // [minTraffic, maxTraffic, minZoom, color, lineWidth]
-    [501, Infinity, 1.5, '#228844', 1.5],
-    [101, 500,      3.0, '#ddcc00', 1.0],
-    [0,   100,      5.0, '#eedd88', 0.5],
+    // Thresholds match new population scale: town~250, village~70, hamlet~30, homestead~10
+    [200, Infinity, 1.0, '#7a6a50', 1.0],   // trade route: warm brown 1px, all zoom
+    [ 40, 199,      4.0, '#9a8a70', 0.5],   // local path: lighter brown 0.5px, zoom > 4
+    // minor tracks (traffic < 40) not rendered — landscape should look mostly empty
   ];
   ctx.globalAlpha = 0.85;
   for (const [minT, maxT, minZ, color, lw] of pathStyles) {
@@ -291,11 +292,12 @@ function renderHabitationOverlay(): void {
 
   // ── Settlements ───────────────────────────────────────────────────────────
   for (const s of currentSettlements.settlements) {
-    if (s.size === 'homestead' && zoom < 2) continue;
+    if (s.size === 'homestead' && zoom < 3) continue;
+    if (s.size === 'hamlet'    && zoom < 2) continue;
     const [px, py] = tc(s.x, s.y);
     if (!vis(px, py)) continue;
-    const r = s.isWalledTown ? 6 : s.size === 'town' ? 5 : s.size === 'village' ? 4
-            : s.size === 'hamlet' ? 3 : 2;
+    const r = s.isWalledTown ? 5 : s.size === 'town' ? 5 : s.size === 'village' ? 3
+            : s.size === 'hamlet' ? 2 : 1.5;
     ctx.fillStyle = '#dd3333';
     ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
     if (s.isWalledTown) {
@@ -372,8 +374,8 @@ function getHabitationHover(tx: number, ty: number): string {
       for (let dx = -1; dx <= 1; dx++)
         bestT = Math.max(bestT, pathLookup.get((ty + dy) * MAP_WIDTH + (tx + dx)) ?? 0);
     if (bestT > 0)
-      parts.push(bestT > 500 ? `Trade route (traffic ${Math.round(bestT)})`
-        : bestT > 100 ? `Local path (traffic ${Math.round(bestT)})` : 'Track');
+      parts.push(bestT > 200 ? `Trade route (traffic ${Math.round(bestT)})`
+        : bestT > 40  ? `Local path (traffic ${Math.round(bestT)})` : 'Track');
   }
 
   if (currentSeasonal && viewport.zoom >= 3) {
