@@ -99,7 +99,7 @@ const MAP_HEIGHT = 500;
 
 // --- Canvas size (display resolution) ---
 const CANVAS_WIDTH = 600;
-const CANVAS_HEIGHT = 800;
+const CANVAS_HEIGHT = 600;
 
 // --- UI Elements ---
 const canvas      = document.getElementById("terrain")    as HTMLCanvasElement;
@@ -186,9 +186,9 @@ function renderHabitationOverlay(): void {
   // ── Paths (3 passes: major → local → minor) ──────────────────────────────
   const pathStyles: [number, number, number, string, number][] = [
     // [minTraffic, maxTraffic, minZoom, color, lineWidth]
-    [501, Infinity, 1.5, '#7a6a50', 1.5],
-    [101, 500,      3.0, '#9a8a70', 1.0],
-    [0,   100,      5.0, '#b0a090', 0.5],
+    [501, Infinity, 1.5, '#228844', 1.5],
+    [101, 500,      3.0, '#ddcc00', 1.0],
+    [0,   100,      5.0, '#eedd88', 0.5],
   ];
   ctx.globalAlpha = 0.85;
   for (const [minT, maxT, minZ, color, lw] of pathStyles) {
@@ -212,8 +212,8 @@ function renderHabitationOverlay(): void {
 
   // ── Fords ────────────────────────────────────────────────────────────────
   if (zoom >= 3) {
-    ctx.fillStyle = '#7090a0';
-    ctx.strokeStyle = '#4a7090';
+    ctx.fillStyle = '#00e5e5';
+    ctx.strokeStyle = '#008888';
     ctx.lineWidth = 0.5;
     for (const f of currentSettlements.fords) {
       const [px, py] = tc(f.x, f.y);
@@ -225,7 +225,7 @@ function renderHabitationOverlay(): void {
 
   // ── Abandoned settlements ─────────────────────────────────────────────────
   if (zoom >= 3) {
-    ctx.strokeStyle = '#8a7a6a';
+    ctx.strokeStyle = '#555555';
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
     for (const s of currentSettlements.abandoned) {
@@ -240,14 +240,14 @@ function renderHabitationOverlay(): void {
 
   // ── Seasonal camps ────────────────────────────────────────────────────────
   if (zoom >= 3) {
-    ctx.fillStyle = '#c0a870';
+    ctx.fillStyle = '#ffffff';
     for (const c of currentSeasonal.camps) {
       const [px, py] = tc(c.x, c.y);
       if (!vis(px, py)) continue;
       ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2); ctx.fill();
     }
     if (currentHunting) {
-      ctx.fillStyle = '#b09060';
+      ctx.fillStyle = '#ffffff';
       for (const circuit of currentHunting.circuits)
         for (const wp of circuit.waypoints) {
           const [px, py] = tc(wp.x, wp.y);
@@ -281,9 +281,9 @@ function renderHabitationOverlay(): void {
     const [px, py] = tc(s.x, s.y);
     if (!vis(px, py)) continue;
     const r = zoom >= 3 ? 5 : 4;
-    ctx.fillStyle = '#c8b070';
+    ctx.fillStyle = '#c09020';
     ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#c8b070';
+    ctx.strokeStyle = '#c09020';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(px, py, r + 3, 0, Math.PI * 2); ctx.stroke();
   }
@@ -295,10 +295,10 @@ function renderHabitationOverlay(): void {
     if (!vis(px, py)) continue;
     const r = s.isWalledTown ? 6 : s.size === 'town' ? 5 : s.size === 'village' ? 4
             : s.size === 'hamlet' ? 3 : 2;
-    ctx.fillStyle = '#b08850';
+    ctx.fillStyle = '#dd3333';
     ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
     if (s.isWalledTown) {
-      ctx.strokeStyle = '#d0b870';
+      ctx.strokeStyle = '#c09020';
       ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(px, py, r + 2.5, 0, Math.PI * 2); ctx.stroke();
     }

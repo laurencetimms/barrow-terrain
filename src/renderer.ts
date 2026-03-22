@@ -598,50 +598,73 @@ function sectionTitle(text: string): HTMLElement {
   return el("div", "key-section-title", text);
 }
 
+interface HabKeyEntry { label: string; styles: Record<string, string> }
+
+const HAB_KEY_ENTRIES: HabKeyEntry[] = [
+  { label: 'Settlement',        styles: { borderRadius:'50%', background:'#dd3333' } },
+  { label: 'Walled town',       styles: { borderRadius:'50%', background:'#dd3333', outline:'2px solid #c09020', outlineOffset:'2px' } },
+  { label: 'Abandoned',         styles: { borderRadius:'50%', background:'transparent', border:'1.5px dashed #555' } },
+  { label: 'Ford',              styles: { borderRadius:'50%', background:'#00e5e5' } },
+  { label: 'Major sacred',      styles: { borderRadius:'50%', background:'#c09020', outline:'1.5px solid #c09020', outlineOffset:'2px' } },
+  { label: 'Significant sacred',styles: { borderRadius:'50%', background:'#c8b070' } },
+  { label: 'Small sacred',      styles: { borderRadius:'50%', background:'rgba(200,176,112,0.65)' } },
+  { label: 'Seasonal camp',     styles: { borderRadius:'50%', background:'#ffffff' } },
+  { label: 'Trade route',       styles: { height:'2px', borderRadius:'1px', background:'#228844', marginTop:'3px' } },
+  { label: 'Local path',        styles: { height:'2px', borderRadius:'1px', background:'#ddcc00', marginTop:'3px' } },
+  { label: 'Track',             styles: { height:'2px', borderRadius:'1px', background:'#eedd88', marginTop:'3px' } },
+];
+
 /**
- * Builds the full key panel: a Geology section (with colour swatches and
- * descriptions) and a Vegetation section (representative colours and labels).
+ * Builds the full key panel as three side-by-side columns:
+ * Geology · Vegetation · Habitation.
  * Call once at startup; the panel content never needs to change.
  */
 export function renderKeyPanel(container: HTMLElement): void {
   container.innerHTML = "";
 
-  // --- Geology section ---
-  container.appendChild(sectionTitle("Geology"));
-
+  // --- Column 1: Geology ---
+  const geoCol = el("div", "key-col");
+  geoCol.appendChild(sectionTitle("Geology"));
   for (const type of GEO_ORDER) {
     const info = GEOLOGY_INFO[type];
     const item = el("div", "key-geo-item");
-
     const swatch = el("div", "key-geo-swatch");
     swatch.style.backgroundColor = info.color;
-
     const text = el("div");
-    const name = el("span", "key-geo-name", info.label);
-    const desc = el("span", "key-geo-desc", info.description);
-    text.appendChild(name);
-    text.appendChild(desc);
-
+    text.appendChild(el("span", "key-geo-name", info.label));
+    text.appendChild(el("span", "key-geo-desc", info.description));
     item.appendChild(swatch);
     item.appendChild(text);
-    container.appendChild(item);
+    geoCol.appendChild(item);
   }
+  container.appendChild(geoCol);
 
-  // --- Vegetation section ---
-  container.appendChild(sectionTitle("Vegetation"));
-
+  // --- Column 2: Vegetation ---
+  const vegCol = el("div", "key-col");
+  vegCol.appendChild(sectionTitle("Vegetation"));
   for (const entry of VEG_KEY_ENTRIES) {
     const item = el("div", "key-veg-item");
-
     const swatch = el("div", "key-veg-swatch");
     swatch.style.backgroundColor = entry.color;
-
-    const label = el("span", "key-veg-label", entry.label);
-
     item.appendChild(swatch);
-    item.appendChild(label);
-    container.appendChild(item);
+    item.appendChild(el("span", "key-veg-label", entry.label));
+    vegCol.appendChild(item);
   }
+  container.appendChild(vegCol);
+
+  // --- Column 3: Habitation ---
+  const habCol = el("div", "key-col");
+  habCol.appendChild(sectionTitle("Habitation"));
+  for (const entry of HAB_KEY_ENTRIES) {
+    const item = el("div", "key-hab-item");
+    const swatch = el("div", "key-hab-swatch");
+    for (const [k, v] of Object.entries(entry.styles))
+      (swatch.style as unknown as Record<string, string>)[k] = v;
+    item.appendChild(swatch);
+    item.appendChild(el("span", "key-hab-label", entry.label));
+    habCol.appendChild(item);
+  }
+  container.appendChild(habCol);
 }
 
 // --- Utility ---

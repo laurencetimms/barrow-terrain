@@ -125,10 +125,13 @@
       min-height: 34px;
     }
 
-    /* Key panel */
+    /* Key panel — three side-by-side columns */
     .key-panel {
-      width: 210px;
-      max-height: 800px;
+      display: flex;
+      flex-direction: row;
+      gap: 16px;
+      align-items: flex-start;
+      max-height: 600px;
       overflow-y: auto;
       background: #1f1d19;
       border: 1px solid #2a2620;
@@ -139,6 +142,12 @@
 
     .key-panel.hidden { display: none; }
 
+    .key-col {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
     .key-section-title {
       font-size: 10px;
       letter-spacing: 0.14em;
@@ -147,12 +156,6 @@
       margin-bottom: 8px;
       padding-bottom: 5px;
       border-bottom: 1px solid #2a2620;
-    }
-
-    .key-section-title + .key-section-title,
-    .key-veg-item ~ .key-section-title,
-    .key-geo-item ~ .key-section-title {
-      margin-top: 14px;
     }
 
     .key-geo-item {
@@ -207,6 +210,26 @@
       font-size: 11px;
       color: #5e5a54;
       line-height: 1.35;
+    }
+
+    .key-hab-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 5px;
+    }
+
+    .key-hab-swatch {
+      width: 10px;
+      height: 10px;
+      flex-shrink: 0;
+    }
+
+    .key-hab-label {
+      font-size: 11px;
+      color: #5e5a54;
+      line-height: 1.35;
+      white-space: nowrap;
     }
 
     .info {
