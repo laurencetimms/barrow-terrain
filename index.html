@@ -87,6 +87,21 @@
       cursor: pointer;
     }
 
+    .world-stats {
+      font-size: 12px;
+      color: #7a7268;
+      background: #1f1d19;
+      border: 1px solid #2a2620;
+      border-radius: 3px;
+      padding: 6px 14px;
+      margin-bottom: 14px;
+      text-align: center;
+      min-width: 300px;
+      line-height: 1.7;
+    }
+
+    .world-stats:empty { display: none; }
+
     /* Map row: canvas on the left, key panel on the right */
     .map-row {
       display: flex;
@@ -261,6 +276,8 @@
       Key
     </label>
   </div>
+
+  <div id="world-stats" class="world-stats"></div>
 
   <div class="map-row">
     <div class="map-area">

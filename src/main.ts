@@ -111,6 +111,7 @@ const keyCheckbox = document.getElementById("show-key")   as HTMLInputElement;
 const keyPanel    = document.getElementById("key-panel")  as HTMLElement;
 const cursorInfo  = document.getElementById("cursor-info") as HTMLElement;
 const zoomInfo    = document.getElementById("zoom-info")  as HTMLElement;
+const worldStats  = document.getElementById("world-stats") as HTMLElement;
 
 canvas.width  = CANVAS_WIDTH;
 canvas.height = CANVAS_HEIGHT;
@@ -666,6 +667,17 @@ function generate(seed: string): void {
   };
 
   render();
+
+  if (currentSettlements && currentSacred) {
+    const s = currentSettlements;
+    const totalPop   = s.settlements.reduce((n, t) => n + t.population, 0);
+    const walledTowns = s.settlements.filter(t => t.isWalledTown).length;
+    worldStats.textContent =
+      `Population ~${totalPop.toLocaleString()}  ·  ` +
+      `${s.settlements.length} settlements (${walledTowns} walled)  ·  ` +
+      `${s.abandoned.length} abandoned  ·  ` +
+      `${currentSacred.major.length} major / ${currentSacred.significant.length} significant / ${currentSacred.small.length} small sacred sites`;
+  }
 
   const elapsed = Math.round(performance.now() - startTime);
   console.log(`Generated terrain from seed "${seed}" in ${elapsed}ms`);
